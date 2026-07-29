@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "qefro-backend"
+version = "1.0.0"
+description = "Qefro backend framework for business tool handlers and customer authorization orchestration"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Qefro" }]
+requires-python = ">=3.9"
+keywords = ["qefro", "ai", "sdk", "business-tools", "customer-support", "chat"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://docs.qefro.com/docs/guides/register-sdk-business-tools"
+Documentation = "https://docs.qefro.com/docs/guides/define-business-flows"
+Repository = "https://github.com/qefro-ai/qefro-python-backend-sdk"
+Issues = "https://github.com/qefro-ai/qefro-python-backend-sdk/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "pytest-asyncio>=0.23"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qefro_backend"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/qefro_backend", "README.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

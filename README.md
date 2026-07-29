@@ -1,0 +1,131 @@
+# Qefro Python Backend SDK
+
+`qefro-backend` is the Python framework for building Qefro **Business Tool**
+handlers and **Business Flows**. Register your tools and flows, serve the signed
+Qefro webhook, and let the Qefro Runtime orchestrate everything — including
+multi-step flows and customer verification.
+
+Wire-compatible with the [JavaScript](https://github.com/qefro-ai/qefro-js-backend-sdk)
+and [Rust](https://github.com/qefro-ai/qefro-rust-backend-sdk) SDKs: same signed
+protocol, same `capabilities.list` schema, same 8 flow step types.
+
+## Install
+
+```bash
+pip install qefro-backend
+```
+
+Zero runtime dependencies — it uses only the Python standard library.
+
+## Quick start
+
+```python
+from qefro_backend import Qefro
+
+app = Qefro(signing_secret="dev-secret")  # or QEFRO_SIGNING_SECRET from env
+
+@app.tool("get_orders", auth="required", lookup={"required": ["email"]})
+async def get_orders(ctx):
+    customer = ctx.customer.require()
+    return [{"orderId": "ord_1", "customerId": customer["id"]}]
+
+app.run(8088)  # POST http://0.0.0.0:8088/qefro
+```
+
+Set the same signing secret in Admin Console → **Business Tools → SDK
+Connections**, then **Sync Tools**. Handlers may be sync or `async`.
+
+## Customer authorization
+
+Register a provider to resolve and verify customers. `auth="required"` tools
+authorize automatically before the handler runs; a `challenge` outcome pauses
+the tool and asks the customer for a code, then resumes.
+
+```python
+from qefro_backend import Qefro, CustomerProvider
+
+app = Qefro("dev-secret")
+
+class Customers(CustomerProvider):
+    async def lookup(self, ctx):
+        return {"id": ctx.identity.get("phone", "demo")}
+
+    async def authorize(self, ctx):
+        if not ctx.response:
+            return ctx.auth.sms_otp(ctx.customer["id"], "Enter the code we texted you.")
+        if ctx.response.strip() != "123456":
+            return ctx.auth.sms_otp(ctx.customer["id"], "Wrong code, try again.")
+        return ctx.auth.success(ctx.customer, {"type": "bearer_token", "access_token": "demo"})
+
+app.customer(Customers())
+```
+
+## Business Flows
+
+Flows describe how your Business Tools are orchestrated. They are **metadata
+only** — the SDK advertises them through `capabilities.list` and the Qefro
+Runtime discovers, validates, versions, and executes them. Nothing runs inside
+the SDK.
+
+```python
+(
+    app.flow({
+        "id": "order_lookup",              # immutable identity — renaming `name` never creates a new flow
+        "name": "Order Lookup",
+        "description": "Look up customer orders",
+        "category": "crm",
+        "tags": ["customer", "orders"],
+        "intent": ["track order", "where is my order"],
+        "inputs": ["email"],
+        "outputs": ["get_orders"],
+    })
+    .ask("email", field="email", prompt="Please enter your email.")
+    .tool("orders", tool_ref="get_orders")
+    .complete("done", message="Here are your recent orders.")
+)
+```
+
+Every step needs a unique `id`; `tool` steps reference an existing Business Tool
+by `tool_ref`. Step builders: `.ask() .tool() .challenge() .upload() .condition()
+.delay() .approval() .complete()`. A duplicate/empty flow or step id raises
+`FlowError`. See [`examples/order-approval`](examples/order-approval) for a full
+`ask → tool → condition → approval → OTP-authenticated tool → complete` flow.
+
+## Protocol
+
+| Message | Purpose |
+| --- | --- |
+| `ping` | Health / Test Connection |
+| `capabilities.list` | Discover tools **and** business flows for Sync Tools |
+| `tools.list` | Legacy tool-only discovery (still supported) |
+| `tool.invoke` | Run a handler |
+| `tool.resume` | Continue after a customer challenge reply |
+
+Requests are HMAC-SHA256 signed (`X-Qefro-Signature` / `X-Qefro-Timestamp`,
+payload `v1:<timestamp>:<body>`). Responses include `X-Qefro-Protocol`,
+`X-Qefro-SDK`, and `X-Qefro-Version`.
+
+## Examples
+
+```bash
+export QEFRO_SIGNING_SECRET=dev-secret
+python examples/basic/server.py            # ask -> tool -> complete
+python examples/order-approval/server.py   # condition + approval + OTP-authenticated tool
+```
+
+## Docs
+
+- [Register SDK Business Tools](https://docs.qefro.com/docs/guides/register-sdk-business-tools)
+- [Define Business Flows](https://docs.qefro.com/docs/guides/define-business-flows)
+- [Run Business Flows](https://docs.qefro.com/docs/guides/run-business-flows)
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+## License
+
+MIT
