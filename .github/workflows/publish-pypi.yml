@@ -38,9 +38,6 @@ jobs:
   publish:
     needs: test
     runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write  # OIDC trusted publishing to PyPI
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,3 +60,5 @@ jobs:
       - name: Publish to PyPI
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
