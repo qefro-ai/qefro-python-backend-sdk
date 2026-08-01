@@ -25,10 +25,13 @@ from .model import (
     AuthOutcome,
     BusinessFlowMetadata,
     ChallengeSignal,
+    EventHandlerDefinition,
     FlowBuilder,
+    FlowError,
     ToolDefinition,
     ToolLookup,
     _FlowRegistration,
+    normalize_flow_trigger,
     normalize_lookup,
 )
 
@@ -37,7 +40,7 @@ try:  # version is best-effort; falls back when running from source
 
     SDK_VERSION = _pkg_version("qefro-backend")
 except Exception:  # pragma: no cover
-    SDK_VERSION = "1.0.0"
+    SDK_VERSION = "1.3.0"
 
 SDK_NAME = "qefro-backend"
 
@@ -305,6 +308,10 @@ class Qefro:
 
         self._tools: Dict[str, tuple[ToolDefinition, ToolHandler]] = {}
         self._flows: Dict[str, _FlowRegistration] = {}
+        self._events: Dict[str, EventHandlerDefinition] = {}
+        self._webhooks: Dict[str, EventHandlerDefinition] = {}
+        self._schedules: Dict[str, EventHandlerDefinition] = {}
+        self._event_handlers: Dict[str, Any] = {}
         self._pending: Dict[str, Dict[str, Any]] = {}
         self._auth_by_conversation: Dict[str, Dict[str, Any]] = {}
         self._provider: Optional[CustomerProvider] = None
@@ -342,7 +349,12 @@ class Qefro:
         return register
 
     def flow(self, metadata: Union[BusinessFlowMetadata, Dict[str, Any]]) -> FlowBuilder:
-        """Register a Business Flow and return a :class:`FlowBuilder`."""
+        """Register a Business Flow and return a :class:`FlowBuilder`.
+
+        Optional ``metadata.trigger`` selects the entry path (conversation /
+        event / schedule / webhook). Events are triggers into the Qefro runtime
+        — not a second execution engine.
+        """
         if isinstance(metadata, dict):
             metadata = BusinessFlowMetadata(**metadata)
         flow_id = metadata.id.strip() if isinstance(metadata.id, str) else ""
@@ -353,9 +365,47 @@ class Qefro:
         metadata.id = flow_id
         if metadata.version is None:
             metadata.version = 1
+        if metadata.trigger is not None:
+            metadata.trigger = normalize_flow_trigger(metadata.trigger)
         registration = _FlowRegistration(metadata=metadata)
         self._flows[flow_id] = registration
         return FlowBuilder(registration)
+
+    def event(self, definition: Union[EventHandlerDefinition, Dict[str, Any]], handler=None):
+        """Register a standalone event handler (advertised via capabilities.list)."""
+        return self._register_named("event", self._events, definition, handler)
+
+    def webhook(self, definition: Union[EventHandlerDefinition, Dict[str, Any]], handler=None):
+        """Register a webhook alias (normalized to an orchestration event at ingest)."""
+        return self._register_named("webhook", self._webhooks, definition, handler)
+
+    def schedule(self, definition: Union[EventHandlerDefinition, Dict[str, Any]], handler=None):
+        """Register a cron schedule. The runtime scheduler emits the named event."""
+        return self._register_named("schedule", self._schedules, definition, handler, require_cron=True)
+
+    def _register_named(self, kind, store, definition, handler=None, require_cron=False):
+        if isinstance(definition, dict):
+            handler = handler or definition.get("handler")
+            definition = EventHandlerDefinition(
+                name=definition.get("name") or "",
+                description=definition.get("description"),
+                cron=definition.get("cron"),
+                handler_type=kind,
+            )
+        else:
+            definition.handler_type = kind
+        name = (definition.name or "").strip()
+        if not name:
+            raise ValueError(f"{kind}() requires a non-empty name")
+        if require_cron and not (definition.cron or "").strip():
+            raise ValueError("schedule() requires a non-empty cron expression")
+        if name in store:
+            raise ValueError(f'{kind} "{name}" is already registered')
+        if handler is None:
+            raise ValueError(f"{kind}() requires a handler")
+        store[name] = definition
+        self._event_handlers[f"{kind}:{name}"] = handler
+        return self
 
     def _build_definition(
         self, name_or_def: Union[str, ToolDefinition, Dict[str, Any]], metadata: Dict[str, Any]
@@ -463,6 +513,9 @@ class Qefro:
                 "type": "capabilities.list",
                 "tools": self._list_tools(),
                 "flows": self._list_flows(),
+                "events": [d.to_wire() for d in self._events.values()],
+                "webhooks": [d.to_wire() for d in self._webhooks.values()],
+                "schedules": [d.to_wire() for d in self._schedules.values()],
                 "protocol_version": self._protocol_version,
                 "sdk_version": SDK_VERSION,
                 "sdk_name": SDK_NAME,

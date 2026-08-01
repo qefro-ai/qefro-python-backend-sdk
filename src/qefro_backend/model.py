@@ -14,6 +14,8 @@ __all__ = [
     "ToolLookup",
     "ToolDefinition",
     "BusinessFlowMetadata",
+    "FlowTrigger",
+    "EventHandlerDefinition",
     "ChallengePayload",
     "AuthenticationContext",
     "AuthOutcome",
@@ -22,6 +24,7 @@ __all__ = [
     "FlowError",
     "FlowBuilder",
     "normalize_lookup",
+    "normalize_flow_trigger",
 ]
 
 ToolAuthMode = Literal["none", "optional", "required"]
@@ -61,6 +64,100 @@ class ToolDefinition:
 
 
 @dataclass
+class FlowTrigger:
+    """How a Business Flow is entered (Phase 3).
+
+    ``type`` is one of ``conversation`` | ``event`` | ``schedule`` | ``webhook``.
+    Optional ``when`` is a payload predicate for event/webhook triggers.
+    """
+
+    type: str = "conversation"
+    event: Optional[str] = None
+    cron: Optional[str] = None
+    name: Optional[str] = None
+    when: Optional[str] = None
+
+    def to_wire(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"type": self.type}
+        if self.type == "event" and self.event:
+            out["event"] = self.event
+        if self.type == "schedule" and self.cron:
+            out["cron"] = self.cron
+        if self.type == "webhook" and self.name:
+            out["name"] = self.name
+        if self.when:
+            out["when"] = self.when
+        return out
+
+
+def normalize_flow_trigger(trigger: Any) -> Optional[Dict[str, Any]]:
+    """Validate a flow trigger; return wire dict or None for default conversation."""
+    if trigger is None:
+        return None
+    if isinstance(trigger, FlowTrigger):
+        t = trigger
+    elif isinstance(trigger, dict):
+        t = FlowTrigger(
+            type=str(trigger.get("type") or "conversation"),
+            event=trigger.get("event"),
+            cron=trigger.get("cron"),
+            name=trigger.get("name"),
+            when=trigger.get("when"),
+        )
+    else:
+        raise ValueError(f"Invalid flow trigger: {trigger!r}")
+    kind = (t.type or "conversation").strip().lower()
+    if kind == "conversation":
+        return {"type": "conversation"}
+    if kind == "event":
+        event = (t.event or "").strip()
+        if not event:
+            raise ValueError("trigger.type=event requires a non-empty event name")
+        if "." not in event:
+            raise ValueError(
+                "trigger.event must be namespaced (e.g. shopify.order.created)"
+            )
+        out: Dict[str, Any] = {"type": "event", "event": event}
+        when = (t.when or "").strip() if getattr(t, "when", None) else ""
+        if when:
+            out["when"] = when
+        return out
+    if kind == "schedule":
+        cron = (t.cron or "").strip()
+        if not cron:
+            raise ValueError("trigger.type=schedule requires a non-empty cron expression")
+        return {"type": "schedule", "cron": cron}
+    if kind == "webhook":
+        out = {"type": "webhook"}  # type: Dict[str, Any]
+        name = (t.name or "").strip()
+        if name:
+            out["name"] = name
+        when = (t.when or "").strip() if getattr(t, "when", None) else ""
+        if when:
+            out["when"] = when
+        return out
+    raise ValueError(f"Unknown flow trigger type: {kind}")
+
+
+@dataclass
+class EventHandlerDefinition:
+    """Standalone event / webhook / schedule handler advertised via capabilities.list."""
+
+    name: str
+    description: Optional[str] = None
+    cron: Optional[str] = None
+    handler_type: str = "event"
+
+    def to_wire(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"name": self.name, "type": self.handler_type}
+        if self.description is not None:
+            out["description"] = self.description
+        if self.cron is not None:
+            out["cron"] = self.cron
+        return out
+
+
+@dataclass
 class BusinessFlowMetadata:
     """Immutable identity + descriptive metadata for a Business Flow.
 
@@ -76,6 +173,7 @@ class BusinessFlowMetadata:
     intent: Optional[List[str]] = None
     inputs: Optional[List[str]] = None
     outputs: Optional[List[str]] = None
+    trigger: Optional[Any] = None
 
 
 # ---------------------------------------------------------------------------
