@@ -20,6 +20,17 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
+from .customer_hub import (
+    ConsentContext,
+    MembershipContext,
+    TimelineContext,
+    hub_call,
+    hub_customer_from_person,
+    is_customer_hub_enabled,
+    is_customer_hub_optional,
+    pick_identity,
+    read_identity_phone,
+)
 from .model import (
     AuthBuilder,
     AuthOutcome,
@@ -40,7 +51,7 @@ try:  # version is best-effort; falls back when running from source
 
     SDK_VERSION = _pkg_version("qefro-backend")
 except Exception:  # pragma: no cover
-    SDK_VERSION = "1.3.0"
+    SDK_VERSION = "1.1.0"
 
 SDK_NAME = "qefro-backend"
 
@@ -56,6 +67,9 @@ __all__ = [
     "CustomerAuthorizeContext",
     "CustomerContext",
     "ToolContext",
+    "TimelineContext",
+    "MembershipContext",
+    "ConsentContext",
     "ServerHandle",
     "SDK_NAME",
     "SDK_VERSION",
@@ -123,11 +137,26 @@ class _CustomerState:
 class CustomerContext:
     """In-handler customer helpers, available as ``ctx.customer``.
 
+    Hub methods (``resolve`` / ``create`` / ``update`` / ``note`` / ``tag``)
+    talk to Customer Hub when ``QEFRO_CUSTOMER_HUB_ENABLED``. External
+    ``CustomerProvider`` auth (``authorize`` / provider ``lookup``) is unchanged.
+
     Attribute access falls through to the resolved customer, so ``ctx.customer.id``
     works when the customer is a mapping.
     """
 
-    def __init__(self, app: "Qefro", *, identity, parameters, conversation_id, channel, state, auth_response):
+    def __init__(
+        self,
+        app: "Qefro",
+        *,
+        identity,
+        parameters,
+        conversation_id,
+        channel,
+        state,
+        auth_response,
+        platform: Optional[Dict[str, Any]] = None,
+    ):
         self._app = app
         self._identity = identity
         self._parameters = parameters
@@ -135,9 +164,57 @@ class CustomerContext:
         self._channel = channel
         self._state: _CustomerState = state
         self._auth_response = auth_response
+        self._platform = platform
 
-    async def lookup(self) -> Any:
-        provider = self._app._require_provider()
+    def _set_current(self, customer: Any) -> Any:
+        self._state.current = customer if customer is not None else None
+        self._state.lookup_completed = True
+        return customer
+
+    def _require_current_id(self) -> str:
+        cur = self._state.current
+        if isinstance(cur, dict) and isinstance(cur.get("id"), str) and cur["id"]:
+            return cur["id"]
+        raise _QefroSignal("customer_not_found")
+
+    async def resolve(self, input_data: Optional[Dict[str, Any]] = None) -> Any:
+        """Resolve-or-create Customer Hub identity (preferred for apps)."""
+        identity = pick_identity(input_data, self._identity)
+        out = hub_call(
+            self._platform,
+            "resolve",
+            {
+                **{k: v for k, v in identity.items() if v is not None},
+                "channel": self._channel or identity.get("channel"),
+                "conversation_id": self._conversation_id,
+            },
+        )
+        hub = hub_customer_from_person(out)
+        if hub:
+            self._set_current(hub)
+        return hub
+
+    async def lookup(self, input_data: Optional[Dict[str, Any]] = None) -> Any:
+        """Lookup only (no create). Hub when enabled / args given; else provider."""
+        provider = self._app._provider
+        # Explicit hub lookup when identity args or hub-only mode.
+        if input_data is not None or provider is None:
+            if self._state.lookup_completed and input_data is None and self._state.current is not None:
+                return self._state.current
+            identity = pick_identity(input_data, self._identity)
+            out = hub_call(
+                self._platform,
+                "lookup",
+                {
+                    **{k: v for k, v in identity.items() if v is not None},
+                    "channel": self._channel or identity.get("channel"),
+                    "conversation_id": self._conversation_id,
+                },
+            )
+            hub = hub_customer_from_person(out)
+            self._set_current(hub)
+            return hub
+
         if self._state.lookup_completed:
             return self._state.current
         customer = await _maybe_await(
@@ -150,17 +227,17 @@ class CustomerContext:
                 )
             )
         )
-        self._state.current = customer if customer is not None else None
-        self._state.lookup_completed = True
-        return customer
+        return self._set_current(customer if customer is not None else None)
 
     async def lookup_by_phone(self, phone: Optional[str] = None) -> Any:
-        provider = self._app._require_provider()
-        source = phone or self._read_identity_phone()
+        source = phone or read_identity_phone(self._identity)
         if not source:
             self._state.lookup_completed = True
             self._state.current = None
             return None
+        provider = self._app._provider
+        if provider is None or is_customer_hub_enabled():
+            return await self.lookup({"phone_number": source, "whatsapp_number": source})
         customer = await _maybe_await(
             provider.lookup(
                 CustomerLookupContext(
@@ -171,9 +248,82 @@ class CustomerContext:
                 )
             )
         )
-        self._state.current = customer if customer is not None else None
-        self._state.lookup_completed = True
-        return customer
+        return self._set_current(customer if customer is not None else None)
+
+    async def create(self, input_data: Dict[str, Any]) -> Any:
+        identity = pick_identity(input_data, self._identity)
+        out = hub_call(
+            self._platform,
+            "create",
+            {
+                **{k: v for k, v in identity.items() if v is not None},
+                "channel": self._channel or identity.get("channel"),
+                "conversation_id": self._conversation_id,
+            },
+        )
+        hub = hub_customer_from_person(out)
+        if hub:
+            self._set_current(hub)
+        return hub
+
+    async def update(self, input_data: Dict[str, Any]) -> Any:
+        customer_id = input_data.get("id") if isinstance(input_data.get("id"), str) else None
+        if not customer_id and isinstance(self._state.current, dict):
+            customer_id = self._state.current.get("id")
+        if not customer_id:
+            if is_customer_hub_optional():
+                return None
+            raise _QefroSignal("customer_not_found")
+        identity = pick_identity(input_data, self._identity)
+        out = hub_call(
+            self._platform,
+            "update",
+            {**{k: v for k, v in identity.items() if v is not None}, "id": customer_id},
+        )
+        hub = hub_customer_from_person(out)
+        if hub:
+            self._set_current(hub)
+        return hub
+
+    async def note(self, content: str, options: Optional[Dict[str, Any]] = None) -> None:
+        trimmed = (content or "").strip()
+        if not trimmed:
+            raise RuntimeError("customer_note_empty")
+        try:
+            customer_id = self._require_current_id()
+        except _QefroSignal:
+            if is_customer_hub_optional():
+                return
+            raise
+        hub_call(
+            self._platform,
+            "note",
+            {
+                "customer_id": customer_id,
+                "content": trimmed,
+                "author_id": (options or {}).get("author_id"),
+            },
+        )
+
+    async def tag(self, name: str, options: Optional[Dict[str, Any]] = None) -> None:
+        trimmed = (name or "").strip()
+        if not trimmed:
+            raise RuntimeError("customer_tag_empty")
+        try:
+            customer_id = self._require_current_id()
+        except _QefroSignal:
+            if is_customer_hub_optional():
+                return
+            raise
+        hub_call(
+            self._platform,
+            "tag",
+            {
+                "customer_id": customer_id,
+                "name": trimmed,
+                "color": (options or {}).get("color"),
+            },
+        )
 
     async def authorize(self, method: Optional[str] = None) -> Any:
         provider = self._app._require_provider()
@@ -211,12 +361,6 @@ class CustomerContext:
             raise _QefroSignal("customer_not_found")
         return self._state.current
 
-    def _read_identity_phone(self) -> Optional[str]:
-        phone = self._identity.get("phone")
-        if isinstance(phone, str) and phone.strip():
-            return phone
-        return None
-
     def __getattr__(self, item: str) -> Any:
         # Only called for attributes not found normally.
         state = self.__dict__.get("_state")
@@ -229,7 +373,20 @@ class CustomerContext:
 class ToolContext:
     """Passed to every tool handler."""
 
-    def __init__(self, *, identity, parameters, conversation_id, channel, authentication, customer):
+    def __init__(
+        self,
+        *,
+        identity,
+        parameters,
+        conversation_id,
+        channel,
+        authentication,
+        customer,
+        timeline: Optional[TimelineContext] = None,
+        membership: Optional[MembershipContext] = None,
+        consent: Optional[ConsentContext] = None,
+        platform: Optional[Dict[str, Any]] = None,
+    ):
         self.identity: Dict[str, Any] = identity
         self.parameters: Dict[str, Any] = parameters
         self.conversation = {"id": conversation_id}
@@ -238,6 +395,12 @@ class ToolContext:
         self.authentication: Optional[Dict[str, Any]] = authentication
         self.logger = logger
         self.customer: CustomerContext = customer
+        self.timeline: TimelineContext = timeline or TimelineContext(platform=platform, state=customer._state)
+        self.membership: MembershipContext = membership or MembershipContext(
+            platform=platform, state=customer._state
+        )
+        self.consent: ConsentContext = consent or ConsentContext(platform=platform, state=customer._state)
+        self.platform = platform
 
 
 class _QefroSignal(Exception):
@@ -542,6 +705,8 @@ class Qefro:
                 pending.get("channel"),
                 auth_response=challenge_response,
                 authentication=req.get("authentication"),
+                platform=req.get("platform") or pending.get("platform"),
+                person=req.get("person") or pending.get("person"),
             )
 
         if not req.get("tool"):
@@ -555,6 +720,8 @@ class Qefro:
             req.get("channel"),
             auth_response=None,
             authentication=req.get("authentication"),
+            platform=req.get("platform"),
+            person=req.get("person"),
         )
 
     async def _invoke_tool(
@@ -567,6 +734,8 @@ class Qefro:
         *,
         auth_response: Optional[str],
         authentication: Optional[Dict[str, Any]],
+        platform: Optional[Dict[str, Any]] = None,
+        person: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         registration = self._tools.get(tool_name)
         if not registration:
@@ -578,6 +747,20 @@ class Qefro:
             current=stored["customer"] if stored else None,
             lookup_completed=bool(stored),
         )
+
+        # Seed hub customer from Person snapshot when present (native chat path).
+        if isinstance(person, dict) and isinstance(person.get("id"), str) and person["id"]:
+            state.current = {
+                "id": person["id"],
+                "phone_number": person.get("phone"),
+                "whatsapp_number": person.get("phone"),
+                "display_name": person.get("name"),
+                "email": person.get("email"),
+                "status": person.get("status"),
+                "workspace_id": person.get("workspace_id"),
+            }
+            state.lookup_completed = True
+
         customer_ctx = CustomerContext(
             self,
             identity=identity or {},
@@ -586,7 +769,24 @@ class Qefro:
             channel=channel,
             state=state,
             auth_response=auth_response,
+            platform=platform,
         )
+
+        solution_id = None
+        if isinstance(platform, dict):
+            cust = platform.get("customer") or {}
+            storage = platform.get("storage") or {}
+            ctx_block = cust.get("context") if isinstance(cust, dict) else None
+            storage_ctx = storage.get("context") if isinstance(storage, dict) else None
+            if isinstance(ctx_block, dict):
+                solution_id = ctx_block.get("solution_id")
+            if not solution_id and isinstance(storage_ctx, dict):
+                solution_id = storage_ctx.get("solution_id")
+
+        timeline = TimelineContext(platform=platform, state=state)
+        membership = MembershipContext(platform=platform, state=state, solution_id=solution_id)
+        consent = ConsentContext(platform=platform, state=state)
+
         ctx = ToolContext(
             identity=identity or {},
             parameters=parameters,
@@ -594,6 +794,10 @@ class Qefro:
             channel=channel,
             authentication=authentication,
             customer=customer_ctx,
+            timeline=timeline,
+            membership=membership,
+            consent=consent,
+            platform=platform,
         )
 
         try:
@@ -616,6 +820,8 @@ class Qefro:
                     "parameters": parameters,
                     "identity": identity,
                     "channel": channel,
+                    "platform": platform,
+                    "person": person,
                 }
             return {"type": "challenge", "resume_token": resume_token, "challenge": sig.challenge}
         except _QefroSignal as sig:

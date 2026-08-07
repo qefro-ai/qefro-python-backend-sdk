@@ -60,6 +60,31 @@ class Customers(CustomerProvider):
 app.customer(Customers())
 ```
 
+## Customer Hub (optional)
+
+When `QEFRO_CUSTOMER_HUB_ENABLED=true`, tools can call Hub via
+`platform.customer` on `tool.invoke` (or `QEFRO_CUSTOMER_HUB_URL` + service
+token). Hub is **optional** — defaults keep existing apps working
+(`ENABLED=false`, `OPTIONAL=true`). Soft-skip returns `None` / no-ops when
+Hub is off or unreachable; set `QEFRO_CUSTOMER_HUB_OPTIONAL=false` to hard-fail.
+
+```python
+@app.tool("create_reservation", auth="none")
+async def create_reservation(ctx):
+    customer = await ctx.customer.resolve({"whatsapp_number": ctx.identity.get("phone")})
+    # Hub properties: ctx.customer.id, .phone_number, .whatsapp_number, .display_name
+    await ctx.timeline.append({
+        "event_type": "reservation.created",
+        "payload": {"code": "R-1001"},
+    })
+    await ctx.membership.attach({"solution_id": "restaurant-pro"})
+    await ctx.consent.grant({"purpose": "marketing"})
+    return {"customer_id": customer["id"] if customer else None}
+```
+
+`ctx.storage` (when present in your stack) remains independent — Hub is never
+the sole path. External CRM auth via `app.customer(provider)` is unchanged.
+
 ## Business Flows
 
 Flows describe how your Business Tools are orchestrated. They are **metadata
