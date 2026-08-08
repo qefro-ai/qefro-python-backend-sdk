@@ -37,6 +37,16 @@ from .customer_hub import (
     pick_identity,
     read_identity_phone,
 )
+from .marketing import (
+    MarketingAction,
+    MarketingAudience,
+    MarketingChannel,
+    MarketingDefinition,
+    MarketingLandingPage,
+    MarketingRegistration,
+    MarketingVariable,
+    validate_marketing_definition,
+)
 from .model import (
     AuthBuilder,
     AuthenticationContext,
@@ -88,6 +98,14 @@ __all__ = [
     "hub_customer_from_person",
     "pick_identity",
     "read_identity_phone",
+    "MarketingAudience",
+    "MarketingVariable",
+    "MarketingAction",
+    "MarketingLandingPage",
+    "MarketingChannel",
+    "MarketingDefinition",
+    "MarketingRegistration",
+    "validate_marketing_definition",
     "SDK_NAME",
     "SDK_VERSION",
     "__version__",

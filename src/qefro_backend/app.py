@@ -31,6 +31,11 @@ from .customer_hub import (
     pick_identity,
     read_identity_phone,
 )
+from .marketing import (
+    MarketingDefinition,
+    MarketingRegistration,
+    validate_marketing_definition,
+)
 from .model import (
     AuthBuilder,
     AuthOutcome,
@@ -475,6 +480,7 @@ class Qefro:
         self._webhooks: Dict[str, EventHandlerDefinition] = {}
         self._schedules: Dict[str, EventHandlerDefinition] = {}
         self._event_handlers: Dict[str, Any] = {}
+        self._marketing: Optional[MarketingRegistration] = None
         self._pending: Dict[str, Dict[str, Any]] = {}
         self._auth_by_conversation: Dict[str, Dict[str, Any]] = {}
         self._provider: Optional[CustomerProvider] = None
@@ -488,6 +494,17 @@ class Qefro:
             provider = provider()
         self._provider = provider
         return provider
+
+    def marketing(self, definition: Union[MarketingDefinition, Dict[str, Any]]) -> "Qefro":
+        """Register Marketing metadata (ADR-004 Phase 1).
+
+        Metadata only — advertised through ``capabilities.list.marketing``.
+        The platform owns campaigns, delivery, and analytics.
+        """
+        if self._marketing is not None:
+            raise ValueError("marketing() may only be called once")
+        self._marketing = validate_marketing_definition(definition)
+        return self
 
     def tool(
         self,
@@ -672,7 +689,7 @@ class Qefro:
             }
 
         if req_type == "capabilities.list":
-            return {
+            out: Dict[str, Any] = {
                 "type": "capabilities.list",
                 "tools": self._list_tools(),
                 "flows": self._list_flows(),
@@ -683,6 +700,9 @@ class Qefro:
                 "sdk_version": SDK_VERSION,
                 "sdk_name": SDK_NAME,
             }
+            if self._marketing is not None:
+                out["marketing"] = self._marketing.to_capability()
+            return out
 
         if req_type == "tool.resume":
             resume_token = req.get("resume_token")

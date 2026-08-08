@@ -479,3 +479,97 @@ async def test_hub_resolve_posts_internal_route(monkeypatch):
     assert calls[0]["body"]["context"]["solution_id"] == "restaurant-pro"
     assert calls[1]["url"].endswith("/v1/internal/customer-hub/timeline_append")
     assert calls[1]["body"]["customer_id"] == "hub-99"
+
+
+# ---------------------------------------------------------------------------
+# Marketing (ADR-004 Phase 1)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_marketing_definition():
+    from qefro_backend import validate_marketing_definition
+
+    reg = validate_marketing_definition(
+        {
+            "version": 1,
+            "audiences": [
+                {
+                    "id": "vip",
+                    "label": "VIP",
+                    "source": "customer_hub",
+                    "customerHub": {"tags": ["vip"], "consentPurpose": "marketing"},
+                }
+            ],
+            "variables": [
+                {
+                    "id": "guest_name",
+                    "label": "Guest name",
+                    "type": "string",
+                    "source": "customer_hub",
+                    "path": "display_name",
+                }
+            ],
+            "actions": [
+                {
+                    "id": "book",
+                    "label": "Book",
+                    "kind": "url",
+                    "landingPageId": "booking",
+                }
+            ],
+            "landingPages": [
+                {"id": "booking", "label": "Booking", "path": "/booking", "host": "app"}
+            ],
+            "channels": [
+                {"id": "whatsapp", "provider": "meta", "enabled": True},
+                {"id": "email", "provider": "sendgrid", "enabled": True},
+            ],
+        }
+    )
+    assert reg.version == 1
+    assert reg.channels[0].provider == "meta"
+    cap = reg.to_capability()
+    assert cap["version"] == 1
+    assert "audiences" in cap["metadata"]
+    assert "audiences" not in cap
+
+
+def test_validate_marketing_rejects_bad_source():
+    from qefro_backend import validate_marketing_definition
+    import pytest
+
+    with pytest.raises(ValueError, match="source"):
+        validate_marketing_definition(
+            {"audiences": [{"id": "a", "label": "A", "source": "crm"}]}
+        )
+
+
+async def test_capabilities_list_includes_marketing():
+    app = make_app()
+    app.marketing(
+        {
+            "audiences": [{"id": "vip", "label": "VIP", "source": "customer_hub"}],
+            "channels": [
+                {"id": "whatsapp", "provider": "meta", "enabled": True},
+                {"id": "email", "provider": "sendgrid", "enabled": True},
+                {"id": "website_widget", "enabled": True},
+            ],
+        }
+    )
+    resp = await app.handle(
+        {"protocol_version": "1", "request_id": "x", "type": "capabilities.list"}
+    )
+    assert resp["type"] == "capabilities.list"
+    assert resp["marketing"]["version"] == 1
+    assert resp["marketing"]["metadata"]["audiences"][0]["id"] == "vip"
+    assert resp["marketing"]["metadata"]["channels"][0]["provider"] == "meta"
+    assert "audiences" not in resp["marketing"]
+
+
+def test_marketing_only_once():
+    import pytest
+
+    app = make_app()
+    app.marketing({"channels": [{"id": "email"}]})
+    with pytest.raises(ValueError, match="only be called once"):
+        app.marketing({"channels": [{"id": "whatsapp"}]})
