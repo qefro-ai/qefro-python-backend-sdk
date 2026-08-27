@@ -48,6 +48,7 @@ from .organization import (
     OrganizationDefinition,
     validate_organization_definition,
 )
+from .conversation import ConversationSlot, validate_conversation_slots
 from .person import PersonContext, build_person_context
 from .storage import StorageContext, build_storage_context
 from .model import (
@@ -539,6 +540,7 @@ class Qefro:
         self._business_events: Dict[str, BusinessEventDefinition] = {}
         self._marketing: Optional[MarketingRegistration] = None
         self._organization: Optional[OrganizationCapabilities] = None
+        self._conversation_slots: Optional[List[ConversationSlot]] = None
         self._pending: Dict[str, Dict[str, Any]] = {}
         self._auth_by_conversation: Dict[str, Dict[str, Any]] = {}
         self._provider: Optional[CustomerProvider] = None
@@ -578,6 +580,19 @@ class Qefro:
         if self._organization is not None:
             raise ValueError("organization() may only be called once")
         self._organization = validate_organization_definition(definition)
+        return self
+
+    def conversation_slots(
+        self, slots: Union[List[ConversationSlot], List[Dict[str, Any]]]
+    ) -> "Qefro":
+        """Register conversation slot metadata (ADR-006).
+
+        Metadata only — advertised through ``capabilities.list.conversation_slots``.
+        Runtime harvests declared ids as opaque app vocabulary.
+        """
+        if self._conversation_slots is not None:
+            raise ValueError("conversation_slots() may only be called once")
+        self._conversation_slots = validate_conversation_slots(slots)
         return self
 
     def use(self, middleware: Callable) -> "Qefro":
@@ -810,6 +825,8 @@ class Qefro:
                 out["marketing"] = self._marketing.to_capability()
             if self._organization is not None:
                 out["organization"] = self._organization.to_capability()
+            if self._conversation_slots is not None:
+                out["conversation_slots"] = [s.to_wire() for s in self._conversation_slots]
             return out
 
         if req_type == "tool.resume":

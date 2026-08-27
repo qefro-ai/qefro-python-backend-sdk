@@ -644,6 +644,43 @@ async def test_organization_context_disabled_without_flag():
     assert cap["metadata"]["events"][0]["id"] == "purchase_requested"
 
 
+async def test_conversation_slots_advertised_on_capabilities_list():
+    app = make_app()
+    app.conversation_slots(
+        [
+            {
+                "id": "spaceship_registration_code",
+                "labels": ["spaceship registration code", "registration code"],
+                "kind": "document_id",
+                "chip_prefix": "ship",
+            },
+            {
+                "id": "quantum_fuel_quantity",
+                "labels": ["quantum fuel", "fuel quantity"],
+                "kind": "integer",
+                "quantity_suffixes": ["units"],
+            },
+        ]
+    )
+    resp = await app.handle(
+        {"protocol_version": "1", "request_id": "x", "type": "capabilities.list"}
+    )
+    slots = resp["conversation_slots"]
+    assert [s["id"] for s in slots] == [
+        "spaceship_registration_code",
+        "quantum_fuel_quantity",
+    ]
+    assert slots[0]["chip_prefix"] == "ship"
+    assert "name" not in slots[0]
+    assert "chipPrefix" not in slots[0]
+
+
+def test_conversation_slots_rejects_duplicate_ids():
+    app = make_app()
+    with pytest.raises(ValueError, match="duplicate id"):
+        app.conversation_slots([{"id": "same"}, {"id": "same"}])
+
+
 # ---------------------------------------------------------------------------
 # Business Events + Person + protocol extras
 # ---------------------------------------------------------------------------

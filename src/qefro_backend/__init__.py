@@ -71,6 +71,12 @@ from .organization import (
     to_organization_capability,
     validate_organization_definition,
 )
+from .conversation import (
+    CapabilityResult,
+    ConversationSlot,
+    OpaqueReference,
+    validate_conversation_slots,
+)
 from .person import (
     PersonContext,
     PersonEvents,
@@ -171,6 +177,10 @@ __all__ = [
     "to_organization_capability",
     "is_organization_enabled",
     "build_organization_context",
+    "ConversationSlot",
+    "OpaqueReference",
+    "CapabilityResult",
+    "validate_conversation_slots",
     "SDK_NAME",
     "SDK_VERSION",
     "__version__",
