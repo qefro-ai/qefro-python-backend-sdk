@@ -6,8 +6,15 @@ and channels. The platform owns campaigns, delivery, and analytics.
 
 from __future__ import annotations
 
+import json
+import os
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional, Union
+
+from .customer_hub import env_flag_true
 
 AudienceSource = Literal["customer_hub", "app_query", "static_filter"]
 VariableType = Literal["string", "number", "datetime", "boolean", "url", "currency"]
@@ -356,6 +363,79 @@ def validate_marketing_definition(
     )
 
 
+def to_marketing_capability(reg: MarketingRegistration) -> Dict[str, Any]:
+    """Build the capabilities.list.marketing wire object."""
+    return reg.to_capability()
+
+
+def is_marketing_enabled() -> bool:
+    return env_flag_true("QEFRO_MARKETING_ENABLED", False)
+
+
+class MarketingContext:
+    """Thin get-own-registration client via ``platform.marketing``. Registry read only."""
+
+    def __init__(self, platform: Optional[Dict[str, Any]] = None):
+        self._platform = platform if isinstance(platform, dict) else {}
+
+    async def get_registration(self) -> Optional[Dict[str, Any]]:
+        if not is_marketing_enabled():
+            return None
+        binding = self._platform.get("marketing") if isinstance(self._platform, dict) else None
+        if not isinstance(binding, dict):
+            binding = {}
+        from_env = (os.environ.get("QEFRO_MARKETING_URL") or "").rstrip("/")
+        base_url = (binding.get("base_url") or from_env or "").rstrip("/")
+        context = binding.get("context")
+        if not base_url or not isinstance(context, dict):
+            return None
+        if not context.get("tenant_id") or not context.get("workspace_id"):
+            return None
+        solution_id = context.get("solution_id")
+        if not solution_id:
+            return None
+        token = (
+            binding.get("token")
+            or os.environ.get("QEFRO_SERVICE_TOKEN")
+            or os.environ.get("QEFRO_INTERNAL_TOKEN")
+            or os.environ.get("QEFRO_INTERNAL_BEARER")
+            or ""
+        )
+        url = (
+            f"{base_url}/v1/internal/marketing/registrations/"
+            f"{urllib.parse.quote(str(solution_id), safe='')}"
+        )
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        headers["x-qefro-tenant-id"] = str(context["tenant_id"])
+        headers["x-qefro-workspace-id"] = str(context["workspace_id"])
+        if context.get("installation_id"):
+            headers["x-qefro-installation-id"] = str(context["installation_id"])
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                text = resp.read().decode("utf-8")
+                status = getattr(resp, "status", 200)
+        except urllib.error.HTTPError as err:
+            if err.code == 404:
+                return None
+            text = err.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"marketing.getRegistration failed ({err.code}): {text}") from err
+        except urllib.error.URLError as err:
+            raise RuntimeError(f"marketing.getRegistration failed: {err}") from err
+        if status < 200 or status >= 300:
+            raise RuntimeError(f"marketing.getRegistration failed ({status}): {text}")
+        if not text:
+            return None
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else None
+
+
+def build_marketing_context(platform: Optional[Dict[str, Any]] = None) -> MarketingContext:
+    return MarketingContext(platform)
+
+
 __all__ = [
     "MarketingAudience",
     "MarketingVariable",
@@ -364,5 +444,9 @@ __all__ = [
     "MarketingChannel",
     "MarketingDefinition",
     "MarketingRegistration",
+    "MarketingContext",
     "validate_marketing_definition",
+    "to_marketing_capability",
+    "is_marketing_enabled",
+    "build_marketing_context",
 ]

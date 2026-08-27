@@ -82,8 +82,30 @@ async def create_reservation(ctx):
     return {"customer_id": customer["id"] if customer else None}
 ```
 
-`ctx.storage` (when present in your stack) remains independent — Hub is never
-the sole path. External CRM auth via `app.customer(provider)` is unchanged.
+`ctx.storage` talks to managed storage (ADR-002) the same way as the JS SDK —
+never call Mongo or storage-service URLs yourself.
+
+## Customer Hub Person and Business Events
+
+`ctx.person` queues Customer Hub mutations (`note`, `tag`, `assign`, `activity`,
+`merge`) for the Qefro runtime. Declare events with `app.business_event(...)`
+and publish them with `ctx.emit(...)` — delivery is outbox → ingest, not CRM
+automation.
+
+```python
+from qefro_backend import Qefro, on_person_created
+
+app = Qefro("dev-secret")
+app.business_event({"event_type": "quotation.created", "version": 1})
+
+@app.tool("create_quotation", auth="none")
+async def create_quotation(ctx):
+    await ctx.person.tag("vip")
+    ctx.emit({"event_type": "quotation.created", "event_id": "Q-1001", "data": {"amount": 125000}})
+    return {"id": "Q-1001"}
+
+app.flow({"id": "welcome", "trigger": on_person_created()}).message("hi", "Hi").complete("done")
+```
 
 ## Business Flows
 
@@ -112,7 +134,7 @@ the SDK.
 
 Every step needs a unique `id`; `tool` steps reference an existing Business Tool
 by `tool_ref`. Step builders: `.ask() .tool() .challenge() .upload() .condition()
-.delay() .approval() .complete()`. A duplicate/empty flow or step id raises
+.delay() .approval() .complete() .message() .tag() .assign() .activity()`. A duplicate/empty flow or step id raises
 `FlowError`. See [`examples/order-approval`](examples/order-approval) for a full
 `ask → tool → condition → approval → OTP-authenticated tool → complete` flow.
 

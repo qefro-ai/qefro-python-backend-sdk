@@ -61,6 +61,8 @@ class ToolDefinition:
     timeout: Optional[int] = None
     default_auth_method: Optional[str] = None
     lookup: Optional[ToolLookup] = None
+    """When False, Qefro will not offer this tool on customer chat channels."""
+    chat: Optional[bool] = None
 
 
 @dataclass
@@ -149,7 +151,7 @@ class EventHandlerDefinition:
     handler_type: str = "event"
 
     def to_wire(self) -> Dict[str, Any]:
-        out: Dict[str, Any] = {"name": self.name, "type": self.handler_type}
+        out: Dict[str, Any] = {"name": self.name}
         if self.description is not None:
             out["description"] = self.description
         if self.cron is not None:
@@ -396,6 +398,28 @@ class FlowBuilder:
 
     def complete(self, id: str, message: Optional[str] = None) -> "FlowBuilder":
         return self._push(id, "complete", {"message": message})
+
+    def message(self, id: str, message: str) -> "FlowBuilder":
+        return self._push(id, "message", {"message": message})
+
+    def tag(self, id: str, name: str, color: Optional[str] = None) -> "FlowBuilder":
+        return self._push(id, "tag", {"name": name, "color": color})
+
+    def activity(
+        self,
+        id: str,
+        activity_type: str,
+        source: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> "FlowBuilder":
+        return self._push(
+            id,
+            "activity",
+            {"activity_type": activity_type, "source": source, "payload": payload},
+        )
+
+    def assign(self, id: str, to: str, handoff: Optional[bool] = None) -> "FlowBuilder":
+        return self._push(id, "assign", {"to": to, "handoff": handoff})
 
     def _push(self, id: str, type_: str, config: Dict[str, Any]) -> "FlowBuilder":
         step_id = id.strip() if isinstance(id, str) else ""

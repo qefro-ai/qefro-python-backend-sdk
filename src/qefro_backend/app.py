@@ -20,6 +20,12 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
+from .business_events import (
+    BusinessEventDefinition,
+    is_business_event_type,
+    normalize_business_event,
+    normalize_emitted_event,
+)
 from .customer_hub import (
     ConsentContext,
     MembershipContext,
@@ -31,11 +37,19 @@ from .customer_hub import (
     pick_identity,
     read_identity_phone,
 )
+from .event_outbox import EventOutbox, default_outbox_dir
 from .marketing import (
     MarketingDefinition,
     MarketingRegistration,
     validate_marketing_definition,
 )
+from .organization import (
+    OrganizationCapabilities,
+    OrganizationDefinition,
+    validate_organization_definition,
+)
+from .person import PersonContext, build_person_context
+from .storage import StorageContext, build_storage_context
 from .model import (
     AuthBuilder,
     AuthOutcome,
@@ -56,7 +70,7 @@ try:  # version is best-effort; falls back when running from source
 
     SDK_VERSION = _pkg_version("qefro-backend")
 except Exception:  # pragma: no cover
-    SDK_VERSION = "1.1.0"
+    SDK_VERSION = "1.2.0"
 
 SDK_NAME = "qefro-backend"
 
@@ -391,6 +405,11 @@ class ToolContext:
         membership: Optional[MembershipContext] = None,
         consent: Optional[ConsentContext] = None,
         platform: Optional[Dict[str, Any]] = None,
+        person: Optional[PersonContext] = None,
+        storage: Optional[StorageContext] = None,
+        settings: Optional[Dict[str, Any]] = None,
+        trace_id: Optional[str] = None,
+        emit_fn: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
         self.identity: Dict[str, Any] = identity
         self.parameters: Dict[str, Any] = parameters
@@ -406,6 +425,27 @@ class ToolContext:
         )
         self.consent: ConsentContext = consent or ConsentContext(platform=platform, state=customer._state)
         self.platform = platform
+        self.person: PersonContext = person or build_person_context(None, [])
+        self.storage: StorageContext = storage or build_storage_context(platform)
+        self.settings: Optional[Dict[str, Any]] = settings
+        self.install_settings: Optional[Dict[str, Any]] = settings
+        self.trace_id: Optional[str] = trace_id
+        self._emit_fn = emit_fn
+
+    def emit(self, event: Dict[str, Any]) -> None:
+        if self._emit_fn is None:
+            raise RuntimeError("ctx.emit is not available")
+        self._emit_fn(event)
+
+    async def require_customer(self, resolver: Callable[[AuthBuilder], Any]) -> Any:
+        builder = AuthBuilder(self.customer._auth_response)
+        outcome = await _maybe_await(resolver(builder))
+        return self.customer._app._consume_auth_outcome(
+            outcome, self.conversation_id, self.customer._state
+        )
+
+    authorize_customer = require_customer
+    require_authentication = require_customer
 
 
 class _QefroSignal(Exception):
@@ -434,6 +474,9 @@ class ServerHandle:
 # ---------------------------------------------------------------------------
 
 
+PENDING_TTL_SECS = 15 * 60
+
+
 class QefroConfig:
     def __init__(
         self,
@@ -442,11 +485,15 @@ class QefroConfig:
         protocol_version: str = "1",
         max_timestamp_skew_seconds: int = 300,
         endpoint_path: str = "/qefro",
+        event_outbox_dir: Optional[str] = None,
+        event_ingest_url: Optional[str] = None,
     ):
         self.signing_secret = signing_secret
         self.protocol_version = protocol_version
         self.max_timestamp_skew_seconds = max_timestamp_skew_seconds
         self.endpoint_path = endpoint_path
+        self.event_outbox_dir = event_outbox_dir
+        self.event_ingest_url = event_ingest_url
 
 
 class Qefro:
@@ -459,6 +506,8 @@ class Qefro:
         protocol_version: str = "1",
         max_timestamp_skew_seconds: int = 300,
         endpoint_path: str = "/qefro",
+        event_outbox_dir: Optional[str] = None,
+        event_ingest_url: Optional[str] = None,
     ):
         if isinstance(signing_secret, QefroConfig):
             config = signing_secret
@@ -468,11 +517,18 @@ class Qefro:
                 protocol_version=protocol_version,
                 max_timestamp_skew_seconds=max_timestamp_skew_seconds,
                 endpoint_path=endpoint_path,
+                event_outbox_dir=event_outbox_dir,
+                event_ingest_url=event_ingest_url,
             )
         self._signing_secret = config.signing_secret
         self._protocol_version = config.protocol_version
         self._max_skew = config.max_timestamp_skew_seconds
         self._endpoint_path = config.endpoint_path
+        ingest = (config.event_ingest_url or "").strip()
+        self._event_ingest_url: Optional[str] = ingest or None
+        self._outbox = EventOutbox(config.event_outbox_dir or default_outbox_dir(self._signing_secret))
+        self._flush_lock = threading.Lock()
+        self._flush_in_flight = False
 
         self._tools: Dict[str, tuple[ToolDefinition, ToolHandler]] = {}
         self._flows: Dict[str, _FlowRegistration] = {}
@@ -480,10 +536,15 @@ class Qefro:
         self._webhooks: Dict[str, EventHandlerDefinition] = {}
         self._schedules: Dict[str, EventHandlerDefinition] = {}
         self._event_handlers: Dict[str, Any] = {}
+        self._business_events: Dict[str, BusinessEventDefinition] = {}
         self._marketing: Optional[MarketingRegistration] = None
+        self._organization: Optional[OrganizationCapabilities] = None
         self._pending: Dict[str, Dict[str, Any]] = {}
         self._auth_by_conversation: Dict[str, Dict[str, Any]] = {}
         self._provider: Optional[CustomerProvider] = None
+        self._middlewares: List[Callable] = []
+        self._before_hooks: List[Callable] = []
+        self._after_hooks: List[Callable] = []
         self._lock = threading.Lock()
 
     # -- registration ------------------------------------------------------
@@ -504,6 +565,39 @@ class Qefro:
         if self._marketing is not None:
             raise ValueError("marketing() may only be called once")
         self._marketing = validate_marketing_definition(definition)
+        return self
+
+    def organization(
+        self, definition: Union[OrganizationDefinition, Dict[str, Any]]
+    ) -> "Qefro":
+        """Register Organization capability metadata (ADR-005 Phase 1).
+
+        Metadata only — advertised through ``capabilities.list.organization``.
+        The platform owns the capability graph, workflows, and inbox.
+        """
+        if self._organization is not None:
+            raise ValueError("organization() may only be called once")
+        self._organization = validate_organization_definition(definition)
+        return self
+
+    def use(self, middleware: Callable) -> "Qefro":
+        self._middlewares.append(middleware)
+        return self
+
+    def before(self, hook: Callable) -> "Qefro":
+        self._before_hooks.append(hook)
+        return self
+
+    def after(self, hook: Callable) -> "Qefro":
+        self._after_hooks.append(hook)
+        return self
+
+    def business_event(self, definition: Union[BusinessEventDefinition, Dict[str, Any]]) -> "Qefro":
+        """Declare a Business Event this connector may emit into the Qefro bus."""
+        normalized = normalize_business_event(definition)
+        if normalized.event_type in self._business_events:
+            raise ValueError(f'businessEvent "{normalized.event_type}" is already registered')
+        self._business_events[normalized.event_type] = normalized
         return self
 
     def tool(
@@ -623,6 +717,8 @@ class Qefro:
                 entry["timeout"] = definition.timeout
             if lookup:
                 entry["lookup"] = {"required": lookup}
+            if definition.chat is not None:
+                entry["chat"] = definition.chat
             out.append(entry)
         return out
 
@@ -669,13 +765,22 @@ class Qefro:
                 "code": "protocol_mismatch",
                 "message": f"Unsupported protocol version {protocol_header}",
             }
-        return await self.handle(json.loads(body))
+        resp = await self.handle(json.loads(body), headers=lower)
+        self._schedule_flush()
+        return resp
 
-    async def handle(self, req: Dict[str, Any]) -> Dict[str, Any]:
+    async def handle(
+        self, req: Dict[str, Any], headers: Optional[Dict[str, Optional[str]]] = None
+    ) -> Dict[str, Any]:
         if req.get("protocol_version") != self._protocol_version:
             return {"type": "error", "code": "protocol_mismatch", "message": "Unsupported protocol version"}
 
         req_type = req.get("type")
+        trace_id = None
+        if headers:
+            raw_trace = headers.get("x-qefro-trace-id")
+            if isinstance(raw_trace, str) and raw_trace.strip():
+                trace_id = raw_trace.strip()
 
         if req_type == "ping":
             return {"type": "pong", "protocol_version": self._protocol_version, "sdk_version": SDK_VERSION}
@@ -696,12 +801,15 @@ class Qefro:
                 "events": [d.to_wire() for d in self._events.values()],
                 "webhooks": [d.to_wire() for d in self._webhooks.values()],
                 "schedules": [d.to_wire() for d in self._schedules.values()],
+                "business_events": [d.to_wire() for d in self._business_events.values()],
                 "protocol_version": self._protocol_version,
                 "sdk_version": SDK_VERSION,
                 "sdk_name": SDK_NAME,
             }
             if self._marketing is not None:
                 out["marketing"] = self._marketing.to_capability()
+            if self._organization is not None:
+                out["organization"] = self._organization.to_capability()
             return out
 
         if req_type == "tool.resume":
@@ -713,8 +821,7 @@ class Qefro:
                     "code": "invalid_request",
                     "message": "resume_token and challenge_response are required",
                 }
-            with self._lock:
-                pending = self._pending.pop(resume_token, None)
+            pending = self._take_pending(resume_token)
             if not pending:
                 return {"type": "error", "code": "not_found", "message": "resume token not found or expired"}
             return await self._invoke_tool(
@@ -727,6 +834,8 @@ class Qefro:
                 authentication=req.get("authentication"),
                 platform=req.get("platform") or pending.get("platform"),
                 person=req.get("person") or pending.get("person"),
+                settings=req.get("settings") or pending.get("settings"),
+                trace_id=trace_id,
             )
 
         if not req.get("tool"):
@@ -742,6 +851,8 @@ class Qefro:
             authentication=req.get("authentication"),
             platform=req.get("platform"),
             person=req.get("person"),
+            settings=req.get("settings"),
+            trace_id=trace_id,
         )
 
     async def _invoke_tool(
@@ -756,6 +867,8 @@ class Qefro:
         authentication: Optional[Dict[str, Any]],
         platform: Optional[Dict[str, Any]] = None,
         person: Optional[Dict[str, Any]] = None,
+        settings: Optional[Dict[str, Any]] = None,
+        trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         registration = self._tools.get(tool_name)
         if not registration:
@@ -806,6 +919,23 @@ class Qefro:
         timeline = TimelineContext(platform=platform, state=state)
         membership = MembershipContext(platform=platform, state=state, solution_id=solution_id)
         consent = ConsentContext(platform=platform, state=state)
+        person_mutations: List[Dict[str, Any]] = []
+        person_ctx = build_person_context(person if isinstance(person, dict) else None, person_mutations)
+        emitted: List[Dict[str, Any]] = []
+
+        def emit_fn(event: Dict[str, Any]) -> None:
+            event_type = str((event or {}).get("event_type") or "").strip()
+            if not is_business_event_type(event_type):
+                raise ValueError(
+                    "ctx.emit() requires a Business Event such as quotation.created, "
+                    f'not a capability; got "{(event or {}).get("event_type")}"'
+                )
+            if self._business_events and event_type not in self._business_events:
+                raise ValueError(f'ctx.emit("{event_type}") is not declared via app.business_event()')
+            durable = normalize_emitted_event(event, self._business_events.get(event_type))
+            self._outbox.put(durable)
+            emitted.append(durable)
+            self._schedule_flush()
 
         ctx = ToolContext(
             identity=identity or {},
@@ -818,21 +948,37 @@ class Qefro:
             membership=membership,
             consent=consent,
             platform=platform,
+            person=person_ctx,
+            storage=build_storage_context(platform),
+            settings=settings,
+            trace_id=trace_id,
+            emit_fn=emit_fn,
         )
 
         try:
+            for hook in self._before_hooks:
+                await _maybe_await(hook(ctx))
+
             if definition.auth == "required":
                 await customer_ctx.authorize(method=definition.default_auth_method)
 
-            output = await _maybe_await(handler(ctx))
+            output = await self._run_middlewares(ctx, handler)
+            for hook in self._after_hooks:
+                output = await _maybe_await(hook(ctx, output))
 
             latest = self._get_valid_auth(conversation_id)
+            events = self._merge_pending_events(emitted)
             result: Dict[str, Any] = {"type": "result", "output": output}
             if latest is not None:
                 result["authentication_context"] = latest["auth"]
+            if person_mutations:
+                result["person_mutations"] = person_mutations
+            if events:
+                result["events"] = events
             return result
         except ChallengeSignal as sig:
             resume_token = str(uuid.uuid4())
+            self._prune_expired_pending()
             with self._lock:
                 self._pending[resume_token] = {
                     "tool": tool_name,
@@ -842,23 +988,160 @@ class Qefro:
                     "channel": channel,
                     "platform": platform,
                     "person": person,
+                    "settings": settings,
+                    "created_at": time.time(),
                 }
             return {"type": "challenge", "resume_token": resume_token, "challenge": sig.challenge}
         except _QefroSignal as sig:
-            code = str(sig)
-            if code == "denied":
-                return {"type": "error", "code": "denied", "message": "Authentication denied"}
-            if code == "customer_not_found":
-                return {"type": "error", "code": "customer_not_found", "message": "Customer not found"}
-            if code == "customer_provider_missing":
+            return self._map_signal(str(sig))
+        except RuntimeError as err:
+            mapped = self._map_signal(str(err))
+            if mapped["code"] != "internal_error" or str(err) in {
+                "person_not_found",
+                "customer_not_found",
+                "denied",
+                "customer_provider_missing",
+            }:
+                if str(err) == "person_not_found":
+                    return {
+                        "type": "error",
+                        "code": "person_not_found",
+                        "message": "No Customer Hub Person is linked to this conversation.",
+                    }
+                return mapped
+            return {"type": "error", "code": "internal_error", "message": str(err)}
+        except Exception as err:  # noqa: BLE001 - surface handler errors as protocol errors
+            if str(err) == "person_not_found":
                 return {
                     "type": "error",
-                    "code": "configuration_error",
-                    "message": "Tool requires customer provider. Configure app.customer(...) first.",
+                    "code": "person_not_found",
+                    "message": "No Customer Hub Person is linked to this conversation.",
                 }
-            return {"type": "error", "code": "internal_error", "message": code}
-        except Exception as err:  # noqa: BLE001 - surface handler errors as protocol errors
             return {"type": "error", "code": "internal_error", "message": str(err)}
+
+    def _map_signal(self, code: str) -> Dict[str, Any]:
+        if code == "denied":
+            return {"type": "error", "code": "denied", "message": "Authentication denied"}
+        if code == "customer_not_found":
+            return {"type": "error", "code": "customer_not_found", "message": "Customer not found"}
+        if code == "person_not_found":
+            return {
+                "type": "error",
+                "code": "person_not_found",
+                "message": "No Customer Hub Person is linked to this conversation.",
+            }
+        if code == "customer_provider_missing":
+            return {
+                "type": "error",
+                "code": "configuration_error",
+                "message": "Tool requires customer provider. Configure app.customer(...) first.",
+            }
+        return {"type": "error", "code": "internal_error", "message": code}
+
+    async def _run_middlewares(self, ctx: ToolContext, handler: ToolHandler) -> Any:
+        index = {"i": -1}
+
+        async def dispatch(i: int) -> Any:
+            if i <= index["i"]:
+                raise RuntimeError("next() called multiple times")
+            index["i"] = i
+            if i == len(self._middlewares):
+                return await _maybe_await(handler(ctx))
+            mw = self._middlewares[i]
+
+            async def nxt():
+                return await dispatch(i + 1)
+
+            return await _maybe_await(mw(ctx, nxt))
+
+        return await dispatch(0)
+
+    def _take_pending(self, token: str) -> Optional[Dict[str, Any]]:
+        self._prune_expired_pending()
+        with self._lock:
+            return self._pending.pop(token, None)
+
+    def _prune_expired_pending(self) -> None:
+        now = time.time()
+        with self._lock:
+            expired = [
+                k for k, v in self._pending.items() if now - v.get("created_at", now) > PENDING_TTL_SECS
+            ]
+            for key in expired:
+                self._pending.pop(key, None)
+
+    def _merge_pending_events(self, session: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        by_id: Dict[str, Dict[str, Any]] = {}
+        for event in self._outbox.pending():
+            eid = event.get("event_id")
+            if isinstance(eid, str) and eid:
+                by_id[eid] = event
+        for event in session:
+            eid = event.get("event_id")
+            if isinstance(eid, str) and eid:
+                by_id[eid] = event
+        return list(by_id.values())
+
+    def _schedule_flush(self) -> None:
+        if not self._event_ingest_url:
+            return
+        with self._flush_lock:
+            if self._flush_in_flight:
+                return
+            self._flush_in_flight = True
+        threading.Thread(target=self._flush_outbox, daemon=True).start()
+
+    def _flush_outbox(self) -> None:
+        try:
+            url = self._event_ingest_url
+            if not url:
+                return
+            for event in self._outbox.pending():
+                if self._post_ingest(url, event) and event.get("event_id"):
+                    self._outbox.ack(str(event["event_id"]))
+        finally:
+            with self._flush_lock:
+                self._flush_in_flight = False
+
+    def _post_ingest(self, url: str, event: Dict[str, Any]) -> bool:
+        import urllib.error
+        import urllib.request
+
+        body = json.dumps(
+            {
+                "name": event.get("event_type"),
+                "event_type": event.get("event_type"),
+                "event_id": event.get("event_id"),
+                "payload": {
+                    "customer": event.get("customer") or {},
+                    "data": event.get("data") or {},
+                    "event_version": event.get("version") or 1,
+                    "external_event_id": event.get("event_id"),
+                    **({"timestamp": event["timestamp"]} if event.get("timestamp") else {}),
+                },
+            },
+            separators=(",", ":"),
+        )
+        ts = str(int(time.time()))
+        signature = self.sign(ts, body)
+        req = urllib.request.Request(
+            url,
+            data=body.encode("utf-8"),
+            headers={
+                "content-type": "application/json",
+                "x-qefro-signature": signature,
+                "x-qefro-timestamp": ts,
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                status = getattr(resp, "status", 200)
+            return 200 <= status < 300 or status == 409
+        except urllib.error.HTTPError as err:
+            return err.code == 409
+        except Exception:  # noqa: BLE001
+            return False
 
     # -- auth state --------------------------------------------------------
 
@@ -872,6 +1155,8 @@ class Qefro:
             stored = self._auth_by_conversation.get(conversation_id)
             if stored and stored["expires_at"] > time.time():
                 return stored
+            if stored:
+                self._auth_by_conversation.pop(conversation_id, None)
         return None
 
     def _consume_auth_outcome(self, outcome: Any, conversation_id: str, state: _CustomerState) -> Any:

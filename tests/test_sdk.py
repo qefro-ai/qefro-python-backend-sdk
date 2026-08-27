@@ -573,3 +573,203 @@ def test_marketing_only_once():
     app.marketing({"channels": [{"id": "email"}]})
     with pytest.raises(ValueError, match="only be called once"):
         app.marketing({"channels": [{"id": "whatsapp"}]})
+
+
+async def test_marketing_context_disabled_without_flag():
+    from qefro_backend import (
+        build_marketing_context,
+        is_marketing_enabled,
+        to_marketing_capability,
+        validate_marketing_definition,
+    )
+
+    assert is_marketing_enabled() is False
+    ctx = build_marketing_context({"marketing": {"base_url": "https://example.invalid"}})
+    assert await ctx.get_registration() is None
+    cap = to_marketing_capability(validate_marketing_definition({"channels": [{"id": "email"}]}))
+    assert cap["version"] == 1
+    assert "metadata" in cap
+
+
+# ---------------------------------------------------------------------------
+# Organization (ADR-005)
+# ---------------------------------------------------------------------------
+
+
+async def test_capabilities_list_includes_organization():
+    app = make_app()
+    app.organization(
+        {
+            "events": [{"id": "purchase_requested", "label": "Purchase requested"}],
+            "actions": [{"id": "create_purchase_request", "label": "Create"}],
+            "tasks": [
+                {
+                    "id": "purchase_approval",
+                    "label": "Purchase approval",
+                    "suggested_workspace_type": "finance",
+                    "priority": "high",
+                }
+            ],
+        }
+    )
+    resp = await app.handle(
+        {"protocol_version": "1", "request_id": "x", "type": "capabilities.list"}
+    )
+    assert resp["organization"]["version"] == 1
+    assert resp["organization"]["metadata"]["events"][0]["id"] == "purchase_requested"
+    assert "templates" not in resp["organization"]["metadata"]
+
+
+def test_organization_rejects_prefixed_ids():
+    app = make_app()
+    with pytest.raises(ValueError, match="opaque capability id"):
+        app.organization({"events": [{"id": "restaurant.purchase_requested"}]})
+
+
+async def test_organization_context_disabled_without_flag():
+    from qefro_backend import (
+        build_organization_context,
+        is_organization_enabled,
+        to_organization_capability,
+        validate_organization_definition,
+    )
+
+    assert is_organization_enabled() is False
+    ctx = build_organization_context({"organization": {"base_url": "https://example.invalid"}})
+    assert await ctx.get_capabilities() is None
+    cap = to_organization_capability(
+        validate_organization_definition({"events": [{"id": "purchase_requested"}]})
+    )
+    assert cap["version"] == 1
+    assert cap["metadata"]["events"][0]["id"] == "purchase_requested"
+
+
+# ---------------------------------------------------------------------------
+# Business Events + Person + protocol extras
+# ---------------------------------------------------------------------------
+
+
+def test_stable_event_id_is_unique_per_type():
+    from qefro_backend import stable_event_id
+
+    assert stable_event_id("quotation.created", "Q-1001") == "quotation.created:Q-1001"
+    assert stable_event_id("order.created", "Q-1001") == "order.created:Q-1001"
+    assert (
+        stable_event_id("quotation.created", "quotation.created:Q-1001")
+        == "quotation.created:Q-1001"
+    )
+
+
+async def test_ctx_emit_persists_versioned_event(tmp_path):
+    app = Qefro("secret", protocol_version="1", event_outbox_dir=str(tmp_path))
+    app.business_event(
+        {"event_type": "quotation.created", "version": 1, "label": "Quotation created"}
+    )
+
+    @app.tool("createQuotation", auth="none")
+    async def create_quotation(ctx):
+        ctx.emit(
+            {
+                "event_type": "quotation.created",
+                "event_id": "Q-1001",
+                "data": {"amount": 125000},
+            }
+        )
+        return {"id": "Q-1001"}
+
+    result = await app.handle(
+        {
+            "protocol_version": "1",
+            "request_id": "r-emit",
+            "type": "tool.invoke",
+            "tool": "createQuotation",
+            "conversation_id": "c1",
+            "parameters": {},
+        }
+    )
+    assert result["type"] == "result"
+    assert result["events"][0]["event_type"] == "quotation.created"
+    assert result["events"][0]["event_id"] == "quotation.created:Q-1001"
+    assert result["events"][0]["version"] == 1
+
+    caps = await app.handle(
+        {"protocol_version": "1", "request_id": "r-caps", "type": "capabilities.list"}
+    )
+    assert caps["business_events"][0]["version"] == 1
+
+
+async def test_person_mutations_and_trace_id():
+    app = make_app()
+
+    @app.tool("tag_person", auth="none")
+    async def tag_person(ctx):
+        await ctx.person.tag("vip")
+        return {"trace": ctx.trace_id, "id": ctx.person.require()["id"]}
+
+    resp = await app.handle(
+        {
+            "protocol_version": "1",
+            "request_id": "x",
+            "type": "tool.invoke",
+            "tool": "tag_person",
+            "person": {"id": "p1", "name": "Ada"},
+        },
+        headers={"x-qefro-trace-id": "trace-1"},
+    )
+    assert resp["type"] == "result"
+    assert resp["output"] == {"trace": "trace-1", "id": "p1"}
+    assert resp["person_mutations"] == [{"op": "tag", "name": "vip"}]
+
+
+async def test_person_not_found_without_snapshot():
+    app = make_app()
+
+    @app.tool("need_person", auth="none")
+    async def need_person(ctx):
+        ctx.person.require()
+        return {}
+
+    resp = await app.handle(
+        {
+            "protocol_version": "1",
+            "request_id": "x",
+            "type": "tool.invoke",
+            "tool": "need_person",
+        }
+    )
+    assert resp["code"] == "person_not_found"
+
+
+async def test_tool_chat_false_advertised():
+    app = make_app()
+
+    @app.tool("approve", auth="none", chat=False)
+    async def approve(ctx):
+        return {"ok": True}
+
+    resp = await app.handle(
+        {"protocol_version": "1", "request_id": "x", "type": "tools.list"}
+    )
+    assert resp["tools"][0]["chat"] is False
+
+
+def test_person_event_helpers():
+    from qefro_backend import PersonEvents, on_person_created
+
+    assert PersonEvents.Created == "person.created"
+    assert on_person_created() == {"type": "event", "event": "person.created"}
+
+
+def test_flow_person_hub_steps():
+    app = make_app()
+    (
+        app.flow({"id": "welcome", "trigger": {"type": "event", "event": "person.created"}})
+        .message("hi", message="Hi {{person.name}}")
+        .tag("vip", name="vip")
+        .assign("sales", to="sales")
+        .activity("note", activity_type="note.logged")
+        .complete("done")
+    )
+    steps = app._list_flows()[0]["steps"]
+    assert [s["type"] for s in steps] == ["message", "tag", "assign", "activity", "complete"]
+
