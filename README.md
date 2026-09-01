@@ -1,9 +1,12 @@
 # Qefro Python Backend SDK
 
-`qefro-backend` is the Python framework for building Qefro **Business Tool**
-handlers and **Business Flows**. Register your tools and flows, serve the signed
-Qefro webhook, and let the Qefro Runtime orchestrate everything — including
-multi-step flows and customer verification.
+`qefro-backend` is the Python framework for connecting **external** systems
+(ERP / POS / CRM) to Qefro: Business Tool handlers and Business Flows over
+the signed `/qefro` webhook.
+
+It is **not** how you build a Marketplace App. Marketplace Apps are
+metadata packages executed by Qefro Runtime (`qefro app init --hosting
+runtime`). See the product docs: Runtime vs SDK.
 
 Wire-compatible with the [JavaScript](https://github.com/qefro-ai/qefro-js-backend-sdk)
 and [Rust](https://github.com/qefro-ai/qefro-rust-backend-sdk) SDKs: same signed
