@@ -63,6 +63,8 @@ class ToolDefinition:
     lookup: Optional[ToolLookup] = None
     """When False, Qefro will not offer this tool on customer chat channels."""
     chat: Optional[bool] = None
+    """Whether the tool connector durably deduplicates requests by idempotency key / request_id."""
+    idempotency_supported: Optional[bool] = False
 
 
 @dataclass

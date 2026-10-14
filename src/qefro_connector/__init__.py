@@ -26,6 +26,16 @@ from .app import (
     ServerHandle,
     ToolContext,
 )
+from .idempotency_inbox import (
+    DEFAULT_CRASH_WINDOW_SECS,
+    DEFAULT_RETENTION_TTL_DAYS,
+    ClaimResult,
+    IdempotencyInbox,
+    InboxRecord,
+    PreMutationError,
+    default_inbox_dir,
+    is_production_env,
+)
 from .business_events import (
     BusinessEventDefinition,
     BusinessEventField,
@@ -219,6 +229,14 @@ __all__ = [
     "OpaqueReference",
     "CapabilityResult",
     "validate_conversation_slots",
+    "ClaimResult",
+    "IdempotencyInbox",
+    "InboxRecord",
+    "PreMutationError",
+    "is_production_env",
+    "default_inbox_dir",
+    "DEFAULT_CRASH_WINDOW_SECS",
+    "DEFAULT_RETENTION_TTL_DAYS",
     "SDK_NAME",
     "SDK_VERSION",
     "__version__",

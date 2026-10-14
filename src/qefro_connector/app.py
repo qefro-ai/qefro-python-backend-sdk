@@ -38,6 +38,13 @@ from .customer_hub import (
     read_identity_phone,
 )
 from .event_outbox import EventOutbox, default_outbox_dir
+from .idempotency_inbox import (
+    DEFAULT_CRASH_WINDOW_SECS,
+    DEFAULT_RETENTION_TTL_DAYS,
+    IdempotencyInbox,
+    PreMutationError,
+    default_inbox_dir,
+)
 from .marketing import (
     MarketingDefinition,
     MarketingRegistration,
@@ -431,6 +438,8 @@ class ToolContext:
         storage: Optional[StorageContext] = None,
         settings: Optional[Dict[str, Any]] = None,
         trace_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
         emit_fn: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
         self.identity: Dict[str, Any] = identity
@@ -452,6 +461,8 @@ class ToolContext:
         self.settings: Optional[Dict[str, Any]] = settings
         self.install_settings: Optional[Dict[str, Any]] = settings
         self.trace_id: Optional[str] = trace_id
+        self.request_id: Optional[str] = request_id
+        self.idempotency_key: Optional[str] = idempotency_key
         self._emit_fn = emit_fn
 
     def emit(self, event: Dict[str, Any]) -> None:
@@ -509,6 +520,7 @@ class QefroConfig:
         endpoint_path: str = "/qefro",
         event_outbox_dir: Optional[str] = None,
         event_ingest_url: Optional[str] = None,
+        idempotency_dir: Optional[str] = None,
     ):
         self.signing_secret = signing_secret
         self.protocol_version = protocol_version
@@ -516,6 +528,7 @@ class QefroConfig:
         self.endpoint_path = endpoint_path
         self.event_outbox_dir = event_outbox_dir
         self.event_ingest_url = event_ingest_url
+        self.idempotency_dir = idempotency_dir
 
 
 class Qefro:
@@ -530,6 +543,7 @@ class Qefro:
         endpoint_path: str = "/qefro",
         event_outbox_dir: Optional[str] = None,
         event_ingest_url: Optional[str] = None,
+        idempotency_dir: Optional[str] = None,
     ):
         if isinstance(signing_secret, QefroConfig):
             config = signing_secret
@@ -541,6 +555,7 @@ class Qefro:
                 endpoint_path=endpoint_path,
                 event_outbox_dir=event_outbox_dir,
                 event_ingest_url=event_ingest_url,
+                idempotency_dir=idempotency_dir,
             )
         self._signing_secret = config.signing_secret
         self._protocol_version = config.protocol_version
@@ -549,6 +564,7 @@ class Qefro:
         ingest = (config.event_ingest_url or "").strip()
         self._event_ingest_url: Optional[str] = ingest or None
         self._outbox = EventOutbox(config.event_outbox_dir or default_outbox_dir(self._signing_secret))
+        self._inbox = IdempotencyInbox(config.idempotency_dir or default_inbox_dir(self._signing_secret))
         self._flush_lock = threading.Lock()
         self._flush_in_flight = False
 
@@ -570,6 +586,9 @@ class Qefro:
         self._before_hooks: List[Callable] = []
         self._after_hooks: List[Callable] = []
         self._lock = threading.Lock()
+
+    def get_idempotency_inbox(self) -> IdempotencyInbox:
+        return self._inbox
 
     # -- registration ------------------------------------------------------
 
@@ -882,6 +901,11 @@ class Qefro:
                 entry["lookup"] = {"required": lookup}
             if definition.chat is not None:
                 entry["chat"] = definition.chat
+            entry["idempotency_supported"] = (
+                definition.idempotency_supported
+                if definition.idempotency_supported is not None
+                else False
+            )
             out.append(entry)
         return out
 
@@ -945,6 +969,14 @@ class Qefro:
             if isinstance(raw_trace, str) and raw_trace.strip():
                 trace_id = raw_trace.strip()
 
+        request_id = str(req.get("request_id") or (headers.get("x-qefro-request-id") if headers else "") or "").strip()
+        idempotency_key = str(
+            req.get("idempotency_key")
+            or (headers.get("x-qefro-idempotency-key") if headers else "")
+            or request_id
+        ).strip()
+        tenant_id = req.get("organization_id") or (headers.get("x-qefro-tenant-id") if headers else None)
+
         if req_type == "ping":
             return {"type": "pong", "protocol_version": self._protocol_version, "sdk_version": SDK_VERSION}
 
@@ -991,6 +1023,7 @@ class Qefro:
             pending = self._take_pending(resume_token)
             if not pending:
                 return {"type": "error", "code": "not_found", "message": "resume token not found or expired"}
+            resume_req_id = request_id or f"resume:{resume_token}"
             return await self._invoke_tool(
                 pending["tool"],
                 pending["parameters"],
@@ -1003,6 +1036,9 @@ class Qefro:
                 person=req.get("person") or pending.get("person"),
                 settings=req.get("settings") or pending.get("settings"),
                 trace_id=trace_id,
+                request_id=resume_req_id,
+                idempotency_key=idempotency_key or resume_req_id,
+                tenant_id=tenant_id,
             )
 
         if not req.get("tool"):
@@ -1020,6 +1056,9 @@ class Qefro:
             person=req.get("person"),
             settings=req.get("settings"),
             trace_id=trace_id,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+            tenant_id=tenant_id,
         )
 
     async def _invoke_tool(
@@ -1036,11 +1075,38 @@ class Qefro:
         person: Optional[Dict[str, Any]] = None,
         settings: Optional[Dict[str, Any]] = None,
         trace_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         registration = self._tools.get(tool_name)
         if not registration:
             return {"type": "error", "code": "not_found", "message": f"Unknown tool: {tool_name}"}
         definition, handler = registration
+
+        idempotency_enabled = definition.idempotency_supported is True
+        effective_request_id = (request_id or "").strip()
+
+        if idempotency_enabled and effective_request_id:
+            claim = self._inbox.claim(tenant_id, tool_name, effective_request_id)
+            if claim.status == "cached":
+                cached_val = claim.response
+                if isinstance(cached_val, dict) and cached_val.get("type") == "result":
+                    return cached_val
+                return {"type": "result", "output": cached_val}
+            if claim.status == "concurrent_execution":
+                return {
+                    "type": "error",
+                    "code": "CONCURRENT_INVOCATION",
+                    "message": f"Tool '{tool_name}' with request_id '{effective_request_id}' is currently being executed by another worker",
+                }
+            if claim.status == "uncertain_crash":
+                created_at = claim.record.created_at if claim.record else "unknown"
+                return {
+                    "type": "error",
+                    "code": "UNCERTAIN_OUTCOME",
+                    "message": f"Tool '{tool_name}' with request_id '{effective_request_id}' was started at {created_at} but did not complete within the crash recovery window ({DEFAULT_CRASH_WINDOW_SECS}s). Manual reconciliation required.",
+                }
 
         stored = self._get_valid_auth(conversation_id)
         state = _CustomerState(
@@ -1119,8 +1185,21 @@ class Qefro:
             storage=build_storage_context(platform),
             settings=settings,
             trace_id=trace_id,
+            request_id=effective_request_id or str(uuid.uuid4()),
+            idempotency_key=idempotency_key or effective_request_id or None,
             emit_fn=emit_fn,
         )
+
+        handler_started = False
+        def _record_failure(err: Any) -> None:
+            if idempotency_enabled and effective_request_id:
+                try:
+                    if not handler_started or isinstance(err, PreMutationError) or getattr(err, "is_pre_mutation", False):
+                        self._inbox.fail_retryable(tenant_id, tool_name, effective_request_id)
+                    else:
+                        self._inbox.fail_uncertain(tenant_id, tool_name, effective_request_id)
+                except Exception:
+                    pass
 
         try:
             for hook in self._before_hooks:
@@ -1129,6 +1208,7 @@ class Qefro:
             if definition.auth == "required":
                 await customer_ctx.authorize(method=definition.default_auth_method)
 
+            handler_started = True
             output = await self._run_middlewares(ctx, handler)
             for hook in self._after_hooks:
                 output = await _maybe_await(hook(ctx, output))
@@ -1142,6 +1222,13 @@ class Qefro:
                 result["person_mutations"] = person_mutations
             if events:
                 result["events"] = events
+
+            if idempotency_enabled and effective_request_id:
+                try:
+                    self._inbox.complete(tenant_id, tool_name, effective_request_id, result)
+                except Exception:
+                    pass
+
             return result
         except ChallengeSignal as sig:
             resume_token = str(uuid.uuid4())
@@ -1160,8 +1247,10 @@ class Qefro:
                 }
             return {"type": "challenge", "resume_token": resume_token, "challenge": sig.challenge}
         except _QefroSignal as sig:
+            _record_failure(sig)
             return self._map_signal(str(sig))
         except RuntimeError as err:
+            _record_failure(err)
             mapped = self._map_signal(str(err))
             if mapped["code"] != "internal_error" or str(err) in {
                 "person_not_found",
@@ -1178,6 +1267,7 @@ class Qefro:
                 return mapped
             return {"type": "error", "code": "internal_error", "message": str(err)}
         except Exception as err:  # noqa: BLE001 - surface handler errors as protocol errors
+            _record_failure(err)
             if str(err) == "person_not_found":
                 return {
                     "type": "error",
