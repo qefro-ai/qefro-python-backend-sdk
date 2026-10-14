@@ -51,6 +51,27 @@ from .organization import (
 from .conversation import ConversationSlot, validate_conversation_slots
 from .person import PersonContext, build_person_context
 from .storage import StorageContext, build_storage_context
+from .whatsapp import (
+    GET_FLOW_STATUS_INPUT_SCHEMA,
+    GET_TEMPLATE_STATUS_INPUT_SCHEMA,
+    LAUNCH_FLOW_INPUT_SCHEMA,
+    SEND_TEMPLATE_INPUT_SCHEMA,
+    WHATSAPP_GET_FLOW_STATUS_TOOL,
+    WHATSAPP_GET_TEMPLATE_STATUS_TOOL,
+    WHATSAPP_LAUNCH_FLOW_TOOL,
+    WHATSAPP_PERMISSIONS,
+    WHATSAPP_SEND_TEMPLATE_TOOL,
+    WhatsAppFlowDefinition,
+    WhatsAppFlowScreen,
+    WhatsAppRegistration,
+    WhatsAppTemplateComponent,
+    WhatsAppTemplateDefinition,
+    execute_get_flow_status,
+    execute_get_template_status,
+    execute_launch_flow,
+    execute_send_template,
+    validate_whatsapp_definition,
+)
 from .model import (
     AuthBuilder,
     AuthOutcome,
@@ -71,7 +92,7 @@ try:  # version is best-effort; falls back when running from source
 
     SDK_VERSION = _pkg_version("qefro-backend")
 except Exception:  # pragma: no cover
-    SDK_VERSION = "1.2.0"
+    SDK_VERSION = "1.3.0"
 
 SDK_NAME = "qefro-backend"
 
@@ -541,6 +562,7 @@ class Qefro:
         self._marketing: Optional[MarketingRegistration] = None
         self._organization: Optional[OrganizationCapabilities] = None
         self._conversation_slots: Optional[List[ConversationSlot]] = None
+        self._whatsapp: Optional[WhatsAppRegistration] = None
         self._pending: Dict[str, Dict[str, Any]] = {}
         self._auth_by_conversation: Dict[str, Dict[str, Any]] = {}
         self._provider: Optional[CustomerProvider] = None
@@ -614,6 +636,132 @@ class Qefro:
             raise ValueError(f'businessEvent "{normalized.event_type}" is already registered')
         self._business_events[normalized.event_type] = normalized
         return self
+
+    def whatsapp(self, definition: Union[WhatsAppRegistration, Dict[str, Any]]) -> "Qefro":
+        """Register WhatsApp message templates and interactive Flows.
+
+        Templates and Flows are defined in code by the developer.
+        Credentials are provided dynamically by Qefro from workspace channel settings (ctx.settings["whatsapp"]).
+        """
+        validated = validate_whatsapp_definition(definition)
+        if self._whatsapp is not None:
+            for t in validated.templates:
+                if any(existing.name == t.name for existing in self._whatsapp.templates):
+                    raise ValueError(f'duplicate whatsapp template name "{t.name}"')
+                self._whatsapp.templates.append(t)
+            for f in validated.flows:
+                if any(existing.id == f.id for existing in self._whatsapp.flows):
+                    raise ValueError(f'duplicate whatsapp flow id "{f.id}"')
+                self._whatsapp.flows.append(f)
+        else:
+            self._whatsapp = validated
+            self._register_whatsapp_tools()
+        return self
+
+    def whatsapp_template(self, template: Union[WhatsAppTemplateDefinition, Dict[str, Any]]) -> "Qefro":
+        """Register a single WhatsApp message template definition."""
+        t = (
+            template.validate()
+            if isinstance(template, WhatsAppTemplateDefinition)
+            else WhatsAppTemplateDefinition(
+                name=template.get("name", ""),
+                language=template.get("language", "en_US"),
+                category=template.get("category"),
+                provider_id=template.get("provider_id") or template.get("providerId"),
+                status=template.get("status", "APPROVED"),
+                components=template.get("components"),
+                description=template.get("description"),
+            ).validate()
+        )
+        if self._whatsapp is None:
+            self._whatsapp = WhatsAppRegistration(version=1, templates=[t], flows=[])
+            self._register_whatsapp_tools()
+        else:
+            if any(existing.name == t.name for existing in self._whatsapp.templates):
+                raise ValueError(f'duplicate whatsapp template name "{t.name}"')
+            self._whatsapp.templates.append(t)
+        return self
+
+    def whatsapp_flow(self, flow: Union[WhatsAppFlowDefinition, Dict[str, Any]]) -> "Qefro":
+        """Register a single WhatsApp interactive Flow definition."""
+        f = (
+            flow.validate()
+            if isinstance(flow, WhatsAppFlowDefinition)
+            else WhatsAppFlowDefinition(
+                id=flow.get("id", ""),
+                name=flow.get("name"),
+                description=flow.get("description"),
+                provider_flow_id=flow.get("provider_flow_id") or flow.get("providerFlowId"),
+                categories=flow.get("categories"),
+                status=flow.get("status", "PUBLISHED"),
+                mode=flow.get("mode", "published"),
+                cta=flow.get("cta", "Continue"),
+                screens=flow.get("screens"),
+                endpoint_url=flow.get("endpoint_url") or flow.get("endpointUrl"),
+            ).validate()
+        )
+        if self._whatsapp is None:
+            self._whatsapp = WhatsAppRegistration(version=1, templates=[], flows=[f])
+            self._register_whatsapp_tools()
+        else:
+            if any(existing.id == f.id for existing in self._whatsapp.flows):
+                raise ValueError(f'duplicate whatsapp flow id "{f.id}"')
+            self._whatsapp.flows.append(f)
+        return self
+
+    def _register_whatsapp_tools(self) -> None:
+        if self._whatsapp is None:
+            return
+        reg = self._whatsapp
+        tools = [
+            (
+                WHATSAPP_SEND_TEMPLATE_TOOL,
+                ToolDefinition(
+                    name=WHATSAPP_SEND_TEMPLATE_TOOL,
+                    description="Send an approved WhatsApp message template to a recipient phone number",
+                    input_schema=SEND_TEMPLATE_INPUT_SCHEMA,
+                    permissions=WHATSAPP_PERMISSIONS,
+                    auth="none",
+                ),
+                lambda ctx: execute_send_template(ctx, reg),
+            ),
+            (
+                WHATSAPP_LAUNCH_FLOW_TOOL,
+                ToolDefinition(
+                    name=WHATSAPP_LAUNCH_FLOW_TOOL,
+                    description="Launch a published WhatsApp Flow interactive message to a recipient phone number",
+                    input_schema=LAUNCH_FLOW_INPUT_SCHEMA,
+                    permissions=WHATSAPP_PERMISSIONS,
+                    auth="none",
+                ),
+                lambda ctx: execute_launch_flow(ctx, reg),
+            ),
+            (
+                WHATSAPP_GET_TEMPLATE_STATUS_TOOL,
+                ToolDefinition(
+                    name=WHATSAPP_GET_TEMPLATE_STATUS_TOOL,
+                    description="Read WhatsApp message template status from the provider",
+                    input_schema=GET_TEMPLATE_STATUS_INPUT_SCHEMA,
+                    permissions=WHATSAPP_PERMISSIONS,
+                    auth="none",
+                ),
+                lambda ctx: execute_get_template_status(ctx, reg),
+            ),
+            (
+                WHATSAPP_GET_FLOW_STATUS_TOOL,
+                ToolDefinition(
+                    name=WHATSAPP_GET_FLOW_STATUS_TOOL,
+                    description="Read WhatsApp Flow status and validation errors from the provider",
+                    input_schema=GET_FLOW_STATUS_INPUT_SCHEMA,
+                    permissions=WHATSAPP_PERMISSIONS,
+                    auth="none",
+                ),
+                lambda ctx: execute_get_flow_status(ctx, reg),
+            ),
+        ]
+        for name, defn, handler in tools:
+            if name not in self._tools:
+                self._tools[name] = (defn, handler)
 
     def tool(
         self,
@@ -827,6 +975,8 @@ class Qefro:
                 out["organization"] = self._organization.to_capability()
             if self._conversation_slots is not None:
                 out["conversation_slots"] = [s.to_wire() for s in self._conversation_slots]
+            if self._whatsapp is not None:
+                out["whatsapp"] = self._whatsapp.to_capability()
             return out
 
         if req_type == "tool.resume":
