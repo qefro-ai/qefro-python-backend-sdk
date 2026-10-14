@@ -1,11 +1,11 @@
 # Basic Python SDK example
 
-Minimal `qefro-backend` handler for Sync Tools / Test Connection.
+Minimal `qefro-connector` handler for Sync Tools / Test Connection.
 
 ## Install
 
 ```bash
-pip install qefro-backend
+pip install qefro-connector
 ```
 
 This example imports the package directly; run it from a venv where the SDK is

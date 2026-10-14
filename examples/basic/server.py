@@ -10,7 +10,7 @@ tunnel) with the same secret, and Sync Tools.
 
 import os
 
-from qefro_backend import CustomerProvider, Qefro
+from qefro_connector import CustomerProvider, Qefro
 
 
 class DemoCustomer(CustomerProvider):

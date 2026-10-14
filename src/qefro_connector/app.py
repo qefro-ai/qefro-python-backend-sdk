@@ -1,4 +1,4 @@
-"""Qefro backend framework: register Business Tools and Business Flows, handle
+"""Qefro connector framework: register Business Tools and Business Flows, handle
 the signed webhook protocol, and orchestrate customer authorization.
 
 Business Flows are metadata only — the SDK advertises them through
@@ -90,11 +90,11 @@ from .model import (
 try:  # version is best-effort; falls back when running from source
     from importlib.metadata import version as _pkg_version
 
-    SDK_VERSION = _pkg_version("qefro-backend")
+    SDK_VERSION = _pkg_version("qefro-connector")
 except Exception:  # pragma: no cover
     SDK_VERSION = "1.3.0"
 
-SDK_NAME = "qefro-backend"
+SDK_NAME = "qefro-connector"
 
 logger = logging.getLogger("qefro")
 
@@ -519,7 +519,7 @@ class QefroConfig:
 
 
 class Qefro:
-    """A Qefro backend app: register tools + flows, then :meth:`run` the webhook."""
+    """A Qefro connector app: register tools + flows, then :meth:`run` the webhook."""
 
     def __init__(
         self,

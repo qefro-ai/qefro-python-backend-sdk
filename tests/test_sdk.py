@@ -1,17 +1,17 @@
-"""Protocol + flow-builder tests for the Qefro Python backend SDK."""
+"""Protocol + flow-builder tests for the Qefro Python connector SDK."""
 
 import json
 
 import pytest
 
-from qefro_backend import (
+from qefro_connector import (
     AuthOutcome,
     CustomerProvider,
     FlowError,
     Qefro,
     normalize_lookup,
 )
-from qefro_backend.model import ToolLookup
+from qefro_connector.model import ToolLookup
 
 
 def make_app() -> Qefro:
@@ -76,7 +76,7 @@ async def test_capabilities_list_advertises_tools_and_flows():
         {"protocol_version": "1", "request_id": "x", "type": "capabilities.list"}
     )
     assert resp["type"] == "capabilities.list"
-    assert resp["sdk_name"] == "qefro-backend"
+    assert resp["sdk_name"] == "qefro-connector"
     assert [t["name"] for t in resp["tools"]] == ["order_status_check"]
     flow = resp["flows"][0]
     assert flow["metadata"]["id"] == "track-order"
@@ -250,7 +250,7 @@ async def test_handle_raw_rejects_bad_signature():
 
 
 # ---------------------------------------------------------------------------
-# Customer Hub (optional, mirrors @qefro-ai/backend 1.7.0)
+# Customer Hub (optional, mirrors @qefro-ai/connector 1.7.0)
 # ---------------------------------------------------------------------------
 
 
@@ -269,7 +269,7 @@ def _clear_hub_env(monkeypatch):
 
 
 def test_hub_flags_defaults():
-    from qefro_backend import (
+    from qefro_connector import (
         env_flag_true,
         is_customer_hub_enabled,
         is_customer_hub_optional,
@@ -282,7 +282,7 @@ def test_hub_flags_defaults():
 
 
 def test_hub_flags_parse_variants(monkeypatch):
-    from qefro_backend import is_customer_hub_enabled, is_customer_hub_optional
+    from qefro_connector import is_customer_hub_enabled, is_customer_hub_optional
 
     monkeypatch.setenv("QEFRO_CUSTOMER_HUB_ENABLED", "on")
     assert is_customer_hub_enabled() is True
@@ -293,7 +293,7 @@ def test_hub_flags_parse_variants(monkeypatch):
 
 
 def test_hub_customer_from_person():
-    from qefro_backend import hub_customer_from_person
+    from qefro_connector import hub_customer_from_person
 
     hub = hub_customer_from_person(
         {"id": "p1", "name": "Ada", "phone": "+1555", "email": "a@b.c"}
@@ -487,7 +487,7 @@ async def test_hub_resolve_posts_internal_route(monkeypatch):
 
 
 def test_validate_marketing_definition():
-    from qefro_backend import validate_marketing_definition
+    from qefro_connector import validate_marketing_definition
 
     reg = validate_marketing_definition(
         {
@@ -535,7 +535,7 @@ def test_validate_marketing_definition():
 
 
 def test_validate_marketing_rejects_bad_source():
-    from qefro_backend import validate_marketing_definition
+    from qefro_connector import validate_marketing_definition
     import pytest
 
     with pytest.raises(ValueError, match="source"):
@@ -576,7 +576,7 @@ def test_marketing_only_once():
 
 
 async def test_marketing_context_disabled_without_flag():
-    from qefro_backend import (
+    from qefro_connector import (
         build_marketing_context,
         is_marketing_enabled,
         to_marketing_capability,
@@ -627,7 +627,7 @@ def test_organization_rejects_prefixed_ids():
 
 
 async def test_organization_context_disabled_without_flag():
-    from qefro_backend import (
+    from qefro_connector import (
         build_organization_context,
         is_organization_enabled,
         to_organization_capability,
@@ -687,7 +687,7 @@ def test_conversation_slots_rejects_duplicate_ids():
 
 
 def test_stable_event_id_is_unique_per_type():
-    from qefro_backend import stable_event_id
+    from qefro_connector import stable_event_id
 
     assert stable_event_id("quotation.created", "Q-1001") == "quotation.created:Q-1001"
     assert stable_event_id("order.created", "Q-1001") == "order.created:Q-1001"
@@ -791,7 +791,7 @@ async def test_tool_chat_false_advertised():
 
 
 def test_person_event_helpers():
-    from qefro_backend import PersonEvents, on_person_created
+    from qefro_connector import PersonEvents, on_person_created
 
     assert PersonEvents.Created == "person.created"
     assert on_person_created() == {"type": "event", "event": "person.created"}

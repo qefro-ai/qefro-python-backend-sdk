@@ -4,7 +4,7 @@ import json
 import time
 import pytest
 
-from qefro_backend import (
+from qefro_connector import (
     Qefro,
     WhatsAppFlowDefinition,
     WhatsAppFlowScreen,
@@ -19,7 +19,7 @@ from qefro_backend import (
     resolve_whatsapp_credentials,
     validate_whatsapp_definition,
 )
-from qefro_backend.whatsapp import (
+from qefro_connector.whatsapp import (
     execute_send_template,
     execute_launch_flow,
 )

@@ -1,6 +1,6 @@
 # Order approval Python SDK example
 
-Runtime Business Flows end to end with `qefro-backend`: `ask`, `condition`
+Runtime Business Flows end to end with `qefro-connector`: `ask`, `condition`
 branching, human `approval`, and an OTP-authenticated `tool` step. Mirrors the
 JS and Rust SDK `order-approval` examples.
 

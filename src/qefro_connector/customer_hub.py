@@ -1,4 +1,4 @@
-"""Optional Customer Hub client — mirrors ``@qefro-ai/backend`` 1.7.0.
+"""Optional Customer Hub client — mirrors ``@qefro-ai/connector`` 1.7.0.
 
 Hub participation is gated by ``QEFRO_CUSTOMER_HUB_ENABLED`` (default false) and
 ``QEFRO_CUSTOMER_HUB_OPTIONAL`` (default true). When disabled/optional, hub

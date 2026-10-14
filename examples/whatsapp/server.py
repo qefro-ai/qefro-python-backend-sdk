@@ -6,7 +6,7 @@ from workspace channel settings (ctx.settings["whatsapp"]).
 """
 
 import os
-from qefro_backend import (
+from qefro_connector import (
     CustomerProvider,
     Qefro,
     WhatsAppFlowDefinition,

@@ -1,19 +1,19 @@
-# Qefro Python Backend SDK
+# Qefro Python Connector SDK
 
-`qefro-backend` connects **external business systems** to Qefro
+`qefro-connector` connects **external business systems** to Qefro
 (ERP / POS / CRM) over the signed `/qefro` webhook.
 
 It is **not** how you build a Marketplace App. Marketplace Apps are
 metadata: `qefro app init` → validate → package → install.
 
-Wire-compatible with the [JavaScript](https://github.com/qefro-ai/qefro-js-backend-sdk)
-and [Rust](https://github.com/qefro-ai/qefro-rust-backend-sdk) SDKs: same signed
+Wire-compatible with the [JavaScript](https://github.com/qefro-ai/qefro-js-connector-sdk)
+and [Rust](https://github.com/qefro-ai/qefro-rust-connector-sdk) SDKs: same signed
 protocol, same `capabilities.list` schema, same 8 flow step types.
 
 ## Install
 
 ```bash
-pip install qefro-backend
+pip install qefro-connector
 ```
 
 Zero runtime dependencies — it uses only the Python standard library.
@@ -21,7 +21,7 @@ Zero runtime dependencies — it uses only the Python standard library.
 ## Quick start
 
 ```python
-from qefro_backend import Qefro
+from qefro_connector import Qefro
 
 app = Qefro(signing_secret="dev-secret")  # or QEFRO_SIGNING_SECRET from env
 
@@ -43,7 +43,7 @@ authorize automatically before the handler runs; a `challenge` outcome pauses
 the tool and asks the customer for a code, then resumes.
 
 ```python
-from qefro_backend import Qefro, CustomerProvider
+from qefro_connector import Qefro, CustomerProvider
 
 app = Qefro("dev-secret")
 
@@ -94,7 +94,7 @@ and publish them with `ctx.emit(...)` — delivery is outbox → ingest, not CRM
 automation.
 
 ```python
-from qefro_backend import Qefro, on_person_created
+from qefro_connector import Qefro, on_person_created
 
 app = Qefro("dev-secret")
 app.business_event({"event_type": "quotation.created", "version": 1})

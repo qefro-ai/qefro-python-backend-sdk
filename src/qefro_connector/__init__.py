@@ -1,4 +1,4 @@
-"""Qefro backend SDK.
+"""Qefro connector SDK.
 
 Register Business Tools and Business Flows, serve the signed Qefro webhook, and
 orchestrate customer authorization. Flows are metadata only — the SDK advertises
@@ -6,7 +6,7 @@ them through ``capabilities.list`` and the Qefro Runtime executes them.
 
 Example
 -------
->>> from qefro_backend import Qefro
+>>> from qefro_connector import Qefro
 >>> app = Qefro("dev-secret")
 >>> @app.tool("get_orders", auth="required")
 ... async def get_orders(ctx):

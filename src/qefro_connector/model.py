@@ -1,8 +1,8 @@
-"""Data model for the Qefro backend SDK: tool/flow definitions, the flow
+"""Data model for the Qefro connector SDK: tool/flow definitions, the flow
 builder, and the customer-authorization primitives.
 
 Everything here is plain data plus a fluent :class:`FlowBuilder`. The HTTP
-protocol and orchestration live in :mod:`qefro_backend.app`.
+protocol and orchestration live in :mod:`qefro_connector.app`.
 """
 
 from __future__ import annotations

@@ -17,7 +17,7 @@ Run:
 import os
 import re
 
-from qefro_backend import CustomerProvider, Qefro
+from qefro_connector import CustomerProvider, Qefro
 
 # Demo OTP for exercising the challenge step end-to-end (never sent anywhere).
 DUMMY_OTP = os.environ.get("DEMO_OTP", "123456")
